@@ -1,0 +1,1 @@
+tensorboard --logdir ~/navsim_workspace/exp/train_dp

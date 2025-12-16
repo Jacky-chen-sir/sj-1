@@ -1,0 +1,47 @@
+# python
+*.pyc
+**/__pycache__/
+.pytest_cache/*
+.pydevproject
+
+.idea
+.idea/*
+
+lightning_logs/
+
+lightning_logs/*
+
+debug/
+debug/*
+
+# IDE
+.vscode/*
+
+# Pip
+*.egg-info
+
+# files
+*.log
+*.pkl
+*.jpg
+*.pcd
+
+# model checkpoints / weights
+*.ckpt
+*.pth
+*.pt
+*.onnx
+*.npy
+*.npz
+
+# exp
+exp
+
+# data
+dataset
+
+# lsf
+*.bsub
+
+# running scripts
+scripts_dev/*

@@ -1,0 +1,44 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# --- IDE ---
+.vscode/
+.idea/
+
+# --- OS / misc ---
+.DS_Store
+*.swp
+*.swo
+
+# --- Logs / outputs ---
+*.log
+*.out
+
+# --- Large binary artifacts (don’t commit by default) ---
+*.ckpt
+*.pth
+*.pt
+*.onnx
+*.npy
+*.npz
+*.pkl
+
+# --- Datasets / caches / experiment outputs ---
+dataset/
+exp/
+navsim_logs/
+sensor_blobs/
+**/cache*/
+**/metric_cache/
+**/training_cache*/
+**/lightning_logs/
+
+# --- Nested repos (tracked separately) ---
+GoalFlow/
+navsim/
+
+# --- Local tools / credentials ---
+.claude/

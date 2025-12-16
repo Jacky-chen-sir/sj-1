@@ -1,0 +1,48 @@
+echo "6f92f38d5f03ed852da7872a7122bdd2  navtrain_current_1.tgz" | md5sum -c -
+echo "7a72f0a758b5df6cbe4c565920a4869f  navtrain_current_2.tgz" | md5sum -c -
+echo "b083fce1428308abb5682a1a150cc1af  navtrain_current_3.tgz" | md5sum -c -
+echo "68354ac2c993aa1ebbfac59547fdb840  navtrain_current_4.tgz" | md5sum -c -
+
+
+echo "6f92f38d5f03ed852da7872a7122bdd2  navtrain_current_1.tgz" | md5sum -c - ; \
+echo "7a72f0a758b5df6cbe4c565920a4869f  navtrain_current_2.tgz" | md5sum -c - ; \
+echo "b083fce1428308abb5682a1a150cc1af  navtrain_current_3.tgz" | md5sum -c - ; \
+echo "68354ac2c993aa1ebbfac59547fdb840  navtrain_current_4.tgz" | md5sum -c -
+
+ DEST="/media/ws/Backup/navsim/trainval_sensor_blobs/trainval" && mkdir -p "$DEST" && for f in "/home/ws/下载"/navtrain_current_{1..4}.tgz; do tar -xzf "$f" -C "$DEST" --overwrite; done
+
+export NUPLAN_MAP_VERSION="nuplan-maps-v1.0"
+export NUPLAN_MAPS_ROOT="$HOME/navsim_workspace/dataset/maps"
+export NAVSIM_EXP_ROOT="$HOME/navsim_workspace/exp"
+export NAVSIM_DEVKIT_ROOT="$HOME/navsim_workspace/GTRS"
+export OPENSCENE_DATA_ROOT="$HOME/navsim_workspace/dataset"
+export NAVSIM_TRAJPDM_ROOT="$HOME/navsim_workspace/dataset/traj_pdm_v2"
+
+
+export PROGRESS_MODE="eval"
+split=navtest 
+agent=hydra_mdp_vov
+dir=train_hydra_mdp
+metric_cache_path="${NAVSIM_EXP_ROOT}/metric_cache" 
+cd ${NAVSIM_DEVKIT_ROOT}
+
+for epoch in 19; do
+    padded_epoch=$(printf "%02d" $epoch)
+    experiment_name="${dir}/test-${padded_epoch}ep-${split}-random"
+    ckpt=/home/ws/navsim_workspace/GTRS/gtrs_aug_vov.ckpt
+ 
+    export DP_PREDS=None
+    export SUBSCORE_PATH=${NAVSIM_EXP_ROOT}/${dir}/epoch${epoch}_${split}.pkl; # save path for the scores
+
+    python ${NAVSIM_DEVKIT_ROOT}/navsim/planning/script/run_pdm_score_gpu_v2.py \
+        agent=$agent \
+        +combined_inference=false \
+        dataloader.params.batch_size=32 \
+        agent.checkpoint_path=${ckpt} \
+        agent.config.vocab_path=${NAVSIM_DEVKIT_ROOT}/traj_final/16384.npy \
+        trainer.params.precision=32 \
+        experiment_name=${experiment_name} \
+        +cache_path=null \
+        metric_cache_path=${metric_cache_path} \
+        train_test_split=${split}_two_stage
+done
