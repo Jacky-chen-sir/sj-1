@@ -1,0 +1,85 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Scheme A: Dense-guided Diffusion Policy
+
+_target_: navsim.agents.dp.gtrs_guided_dp_agent.GTRSGuidedDPAgent
+_convert_: 'all'
+
+# The guided agent uses DP's trajectory sampling
+
+dp_config:
+  _target_: navsim.agents.dp.dp_config.DPConfig
+  _convert_: 'all'
+  seq_len: 2
+  ckpt_path: dp_ckpt
+  lidar_seq_len: 4
+  sigma: 0.5
+  trajectory_imi_weight: 1.0
+  num_proposals: 100
+
+  use_back_view: True
+  fusion_layers: 3
+  progress_weight: 2.0
+
+  normalize_vocab_pos: True
+
+  camera_width: 2048
+  camera_height: 512
+  img_vert_anchors: 16
+  img_horz_anchors: 64
+  backbone_type: 'vov'
+
+  vov_ckpt: ${oc.env:OPENSCENE_DATA_ROOT}/models/dd3d_det_final.pth
+  lr_mult_backbone: 1.0
+
+  trajectory_sampling:
+    _target_: nuplan.planning.simulation.trajectory.trajectory_sampling.TrajectorySampling
+    _convert_: 'all'
+    time_horizon: 4
+    interval_length: 0.5
+
+# Dense scorer config (Hydra/GTRS-Dense)
+dense_config:
+  _target_: navsim.agents.gtrs_dense.hydra_config.HydraConfig
+  _convert_: 'all'
+  vocab_path: ${oc.env:NAVSIM_DEVKIT_ROOT}/traj_final/16384.npy
+  ckpt_path: hydra_plus_16384_ckpt
+  vocab_size: 16384
+  lidar_seq_len: 4
+  sigma: 0.5
+  trajectory_imi_weight: 1.0
+  progress_weight: 2.0
+
+  vocab_dropout: True
+  normalize_vocab_pos: True
+
+  camera_width: 2048
+  camera_height: 512
+  img_vert_anchors: 16
+  img_horz_anchors: 64
+  backbone_type: 'vov'
+
+  vov_ckpt: ${oc.env:OPENSCENE_DATA_ROOT}/models/dd3d_det_final.pth
+  lr_mult_backbone: 1.0
+
+  trajectory_sampling:
+    _target_: nuplan.planning.simulation.trajectory.trajectory_sampling.TrajectorySampling
+    _convert_: 'all'
+    time_horizon: 4
+    interval_length: 0.1
+
+# Checkpoints
+dp_checkpoint_path: null
+# reuse agent.checkpoint_path as dense checkpoint
+checkpoint_path: null
+
+# Dense needs this for training loss; in inference it is optional, but keep for completeness
+pdm_gt_path: ${oc.env:OPENSCENE_DATA_ROOT}/traj_pdm_v2/ori/navtrain_16384.pkl
+
+# Guidance knobs
+anchor_topk: 1
+final_topk: 1
+dp_only_inference: true
+
+lr: 1e-4
