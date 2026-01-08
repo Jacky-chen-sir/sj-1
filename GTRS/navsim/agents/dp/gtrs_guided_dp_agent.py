@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Union, Optional
 
 import pytorch_lightning as pl
 import torch
@@ -16,7 +16,7 @@ from navsim.agents.dp.dp_model import DPModel
 from navsim.agents.gtrs_dense.gtrs_agent import GTRSAgent
 from navsim.agents.gtrs_dense.hydra_config import HydraConfig
 from navsim.agents.gtrs_dense.hydra_features import HydraFeatureBuilder, HydraTargetBuilder
-from navsim.common.dataclasses import SensorConfig, Trajectory
+from navsim.common.dataclasses import SensorConfig
 
 
 class GTRSGuidedDPAgent(AbstractAgent):
@@ -24,8 +24,8 @@ class GTRSGuidedDPAgent(AbstractAgent):
     then condition DP sampling on this anchor and rescore to select final output.
 
     Notes:
-    - This is an inference-first implementation. Training is not modified.
-    - Anchor conditioning is implemented in DPModel/DPHead via features['anchor_traj'].
+    - Inference-first implementation; training can be added later.
+    - Anchor conditioning is implemented in DPHead.forward(anchor_traj=...).
     """
 
     def __init__(
@@ -33,9 +33,9 @@ class GTRSGuidedDPAgent(AbstractAgent):
         dp_config: DPConfig,
         dense_config: HydraConfig,
         lr: float,
-        dp_checkpoint_path: str = None,
-        dense_checkpoint_path: str = None,
-        pdm_gt_path: str | None = None,
+        dp_checkpoint_path: Optional[str] = None,
+        dense_checkpoint_path: Optional[str] = None,
+        pdm_gt_path: Optional[str] = None,
         anchor_topk: int = 1,
         final_topk: int = 1,
         dp_only_inference: bool = True,
@@ -52,6 +52,7 @@ class GTRSGuidedDPAgent(AbstractAgent):
         self._dp_only_inference = dp_only_inference
 
         self.dp_model = DPModel(dp_config)
+
         # For scoring we reuse the dense agent implementation (HydraModel inside)
         self.dense_agent = GTRSAgent(
             config=dense_config,
@@ -79,7 +80,6 @@ class GTRSGuidedDPAgent(AbstractAgent):
         self.dense_agent.initialize()
 
     def get_sensor_config(self) -> SensorConfig:
-        # Same sensors as DP / Dense
         return SensorConfig(
             cam_f0=[0, 1, 2, 3],
             cam_l0=[0, 1, 2, 3],
@@ -93,11 +93,14 @@ class GTRSGuidedDPAgent(AbstractAgent):
         )
 
     def get_target_builders(self):
-        # In inference we can reuse hydra builders (status/camera features). Targets unused.
+        # DPAgent in this repo reuses HydraTargetBuilder but passes DPConfig.
+        # We keep it consistent to avoid config mismatch elsewhere.
         return [HydraTargetBuilder(config=self._dp_config)]
 
     def get_feature_builders(self):
-        return [HydraFeatureBuilder(config=self._dp_config)]
+        # IMPORTANT: HydraFeatureBuilder strictly expects HydraConfig fields (seq_len, camera_width...).
+        # Passing DPConfig will crash. Use the dense_config to build features.
+        return [HydraFeatureBuilder(config=self._dense_config)]
 
     @torch.no_grad()
     def forward(self, features: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
@@ -108,12 +111,13 @@ class GTRSGuidedDPAgent(AbstractAgent):
             raise RuntimeError("DP did not output 'dp_pred' in inference mode")
 
         # 2) Dense scorer evaluates proposals and selects anchor
-        score_out_1 = self.dense_agent.evaluate_dp_proposals(
+        score_out_1 = self.dense_agent.model.evaluate_dp_proposals(
             features,
             dp_proposals_1,
+            topk=max(1, int(self._anchor_topk)),
+            dp_only_inference=self._dp_only_inference,
         )
-        # HydraTrajHead.eval_dp_proposals returns 'selected_traj' (topk trajectories) in most setups.
-        # Fall back to 'trajectory' if necessary.
+
         anchor_traj = score_out_1.get("selected_traj", None)
         if anchor_traj is None:
             anchor_traj = score_out_1.get("trajectory", None)
@@ -122,38 +126,33 @@ class GTRSGuidedDPAgent(AbstractAgent):
 
         # anchor_traj could be [B, K, T, 3] or [B, T, 3]
         if anchor_traj.dim() == 4:
-            # use top-1
             anchor_traj = anchor_traj[:, 0]
 
         # 3) DP generate proposals conditioned on anchor
-        features_guided = dict(features)
-        features_guided["anchor_traj"] = anchor_traj
-        dp_out_2 = self.dp_model(features_guided)
+        dp_out_2 = self.dp_model(features, anchor_traj=anchor_traj)
         dp_proposals_2 = dp_out_2.get("dp_pred")
+        if dp_proposals_2 is None:
+            raise RuntimeError("Guided DP did not output 'dp_pred'")
 
         # 4) Dense rescore final proposals and pick final trajectory
-        score_out_2 = self.dense_agent.evaluate_dp_proposals(
+        score_out_2 = self.dense_agent.model.evaluate_dp_proposals(
             features,
             dp_proposals_2,
+            topk=max(1, int(self._final_topk)),
+            dp_only_inference=self._dp_only_inference,
         )
 
-        # Return in the standard format expected by AgentLightningModule: 'trajectory'
-        final = {}
+        # Standard output key expected by evaluators: 'trajectory'
         if "trajectory" in score_out_2:
-            final["trajectory"] = score_out_2["trajectory"]
-        elif "selected_traj" in score_out_2:
-            # pick top-1
-            final["trajectory"] = score_out_2["selected_traj"][:, 0]
-        else:
-            # last fallback: take anchor itself
-            final["trajectory"] = anchor_traj
-        return final
+            return {"trajectory": score_out_2["trajectory"]}
+        if "selected_traj" in score_out_2:
+            return {"trajectory": score_out_2["selected_traj"][:, 0]}
+        return {"trajectory": anchor_traj}
 
     def compute_loss(self, *args, **kwargs):
         raise NotImplementedError("GTRSGuidedDPAgent is intended for inference-first experiments.")
 
     def get_optimizers(self) -> Union[Optimizer, Dict[str, Union[Optimizer, LRScheduler]]]:
-        # Provide optimizer for compatibility (unused in inference)
         params = list(self.dp_model.parameters())
         if self.scheduler == 'default':
             return torch.optim.Adam(params, lr=self._lr, weight_decay=self._dp_config.weight_decay)

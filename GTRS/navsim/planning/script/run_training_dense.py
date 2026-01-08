@@ -154,10 +154,19 @@ def main(cfg: DictConfig) -> None:
         trainer = pl.Trainer(**cfg.trainer.params,
                              callbacks=agent.get_training_callbacks())
     else:
-        trainer = pl.Trainer(**cfg.trainer.params,
-                             callbacks=agent.get_training_callbacks(),
-                             strategy=DDPStrategy(static_graph=True,
-                                                  timeout=datetime.timedelta(seconds=3600)))
+        # Avoid passing `strategy` twice: sometimes cfg.trainer.params already contains it.
+        strategy_in_cfg = "strategy" in cfg.trainer.params and cfg.trainer.params.strategy is not None
+        if strategy_in_cfg:
+            trainer = pl.Trainer(
+                **cfg.trainer.params,
+                callbacks=agent.get_training_callbacks(),
+            )
+        else:
+            trainer = pl.Trainer(
+                **cfg.trainer.params,
+                callbacks=agent.get_training_callbacks(),
+                strategy=DDPStrategy(static_graph=True, timeout=datetime.timedelta(seconds=3600)),
+            )
 
     logger.info("Starting Training")
     trainer.fit(

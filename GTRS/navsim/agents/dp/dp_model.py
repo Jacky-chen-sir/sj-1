@@ -14,7 +14,7 @@
 # limitations under the License.
 
 import math
-from typing import Dict
+from typing import Dict, Tuple, List, Optional
 
 import torch
 import torch.nn as nn
@@ -222,13 +222,28 @@ class DPHead(nn.Module):
         )
         self.num_inference_steps = self.noise_scheduler.config.num_train_timesteps
 
-    def forward(self, kv) -> Dict[str, torch.Tensor]:
+        # --- Scheme A: anchor-trajectory conditioning (optional) ---
+        # anchor_traj expected shape: [B, HORIZON, 3] in local coords.
+        # We embed it into the same d_model and append as an extra memory token.
+        self._anchor_embed = nn.Sequential(
+            nn.Linear(HORIZON * ACTION_DIM_ORI, d_ffn),
+            nn.ReLU(),
+            nn.Linear(d_ffn, d_model),
+        )
+
+    def forward(self, kv, anchor_traj: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         B = kv.shape[0]
         result = {}
         if not self.training:
             NUM_PROPOSALS = self.config.num_proposals
 
-            condition = kv.repeat_interleave(NUM_PROPOSALS, dim=0)
+            condition = kv
+            if anchor_traj is not None:
+                # [B, H, 3] -> [B, 1, d_model]
+                anchor_token = self._anchor_embed(anchor_traj.reshape(B, -1).to(condition.dtype)).unsqueeze(1)
+                condition = torch.cat([condition, anchor_token], dim=1)
+
+            condition = condition.repeat_interleave(NUM_PROPOSALS, dim=0)
 
             noise = torch.randn(
                 size=(B * NUM_PROPOSALS, HORIZON, ACTION_DIM),
@@ -392,7 +407,9 @@ class DPModel(nn.Module):
         keyval += self._keyval_embedding.weight[None, ...]
 
         output: Dict[str, torch.Tensor] = {}
-        trajectory = self._trajectory_head(keyval)
+        # Support passing anchor trajectory through features (optional, for guided inference)
+        anchor_traj = features.get('anchor_traj', None)
+        trajectory = self._trajectory_head(keyval, anchor_traj=anchor_traj)
 
         output.update(trajectory)
 

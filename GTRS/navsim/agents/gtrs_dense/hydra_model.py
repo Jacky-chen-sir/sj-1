@@ -15,6 +15,7 @@
 
 from typing import Dict
 
+import os
 import numpy as np
 import torch
 import torch.nn as nn
@@ -138,6 +139,14 @@ class HydraTrajHead(nn.Module):
         super().__init__()
         self.config = config
         self._num_poses = num_poses
+
+        if vocab_path is None:
+            raise FileNotFoundError("vocab_path is None (expected a .npy trajectory vocabulary file)")
+        if not isinstance(vocab_path, str) or not vocab_path:
+            raise FileNotFoundError(f"vocab_path is invalid: {vocab_path!r}")
+        if not os.path.exists(vocab_path):
+            raise FileNotFoundError(f"vocab_path not found: {vocab_path}")
+
         self.transformer = nn.TransformerDecoder(
             nn.TransformerDecoderLayer(
                 d_model, nhead, d_ffn,

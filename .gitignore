@@ -40,5 +40,9 @@ sensor_blobs/
 GoalFlow/
 navsim/
 
+# Allow committing a small set of files under navsim/ for custom experiments
+!navsim/agents/dp/gtrs_guided_dp_agent.py
+!navsim/planning/script/config/common/agent/gtrs_guided_dp.yaml
+
 # --- Local tools / credentials ---
 .claude/

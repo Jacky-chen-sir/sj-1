@@ -165,6 +165,23 @@ class HydraConfig(TransfuserConfig):
     agent_box_weight: float = 1.0
     bev_semantic_weight: float = 10.0
 
+    # Freeze perception (backbone / BEV / detection / semantic) modules during training.
+    freeze_perception: bool = False
+    # Parameter name keywords to identify perception modules to freeze.
+    # Note: tuned for gtrs_dense HydraModel structure.
+    freeze_perception_keywords: Tuple[str, ...] = (
+        "_backbone",              # HydraBackbone
+        "image_encoder",          # VoVNet backbone
+        "downscale_layer",        # img->d_model projection
+        "_keyval_embedding",      # token embedding for perception tokens
+        "_query_embedding",       # query embedding (agent queries etc.)
+        "_tf_decoder",            # decoder over perception tokens
+        "_agent_head",            # detection head
+        "bev",                    # any BEV branches
+        "semantic",               # semantic branches
+        "detection",              # detection branches
+    )
+
     # BEV mapping
     bev_semantic_classes = {
         1: ("polygon", [SemanticMapLayer.LANE, SemanticMapLayer.INTERSECTION]),  # road

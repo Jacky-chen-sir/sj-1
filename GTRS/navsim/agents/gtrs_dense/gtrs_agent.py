@@ -185,16 +185,34 @@ class GTRSAgent(AbstractAgent):
         self._lr = lr
         self.metrics = list(config.trajectory_pdm_weight.keys())
         self._checkpoint_path = checkpoint_path
+
+        if self._checkpoint_path is not None and not os.path.exists(self._checkpoint_path):
+            raise FileNotFoundError(f"checkpoint_path not found: {self._checkpoint_path}")
+
         if self._config.version == 'default':
             self.model = HydraModel(config)
         else:
             raise ValueError('Unsupported hydra version')
+
+        # Optionally freeze perception modules (backbone / BEV / detection / semantic)
+        # so that only trajectory scoring heads are trained.
+        if getattr(self._config, "freeze_perception", False):
+            keywords = tuple(getattr(self._config, "freeze_perception_keywords", ()))
+            for name, p in self.model.named_parameters():
+                if any(k in name for k in keywords):
+                    p.requires_grad = False
+            num_trainable = sum(1 for p in self.model.parameters() if p.requires_grad)
+            num_total = sum(1 for _ in self.model.parameters())
+            print(f"[INFO] freeze_perception enabled: trainable params {num_trainable}/{num_total}")
+
         self.vocab_size = config.vocab_size
         self.backbone_wd = config.backbone_wd
         self.scheduler = config.scheduler
+
         if pdm_gt_path is not None:
-            self.vocab_pdm_score_full = pickle.load(
-                open(pdm_gt_path, 'rb'))
+            if not os.path.exists(pdm_gt_path):
+                raise FileNotFoundError(f"pdm_gt_path not found: {pdm_gt_path}")
+            self.vocab_pdm_score_full = pickle.load(open(pdm_gt_path, 'rb'))
 
     def name(self) -> str:
         """Inherited, see superclass."""
@@ -259,6 +277,24 @@ class GTRSAgent(AbstractAgent):
                                                three2two=self._config.three2two)
 
     def get_optimizers(self) -> Union[Optimizer, Dict[str, Union[Optimizer, LRScheduler]]]:
+        # If freeze_perception is enabled, only optimize trainable params.
+        if getattr(self._config, "freeze_perception", False):
+            trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+            if self.scheduler == 'default':
+                return torch.optim.Adam(trainable_params, lr=self._lr, weight_decay=self._config.weight_decay)
+            elif self.scheduler == 'cycle':
+                optim = torch.optim.Adam(trainable_params, lr=self._lr)
+                return {
+                    "optimizer": optim,
+                    "lr_scheduler": OneCycleLR(
+                        optim,
+                        max_lr=0.001,
+                        total_steps=20 * 196
+                    )
+                }
+            else:
+                raise ValueError('Unsupported lr scheduler')
+
         backbone_params_name = '_backbone.image_encoder'
         img_backbone_params = list(
             filter(lambda kv: backbone_params_name in kv[0], self.model.named_parameters()))

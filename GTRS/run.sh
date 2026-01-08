@@ -35,8 +35,7 @@ MASTER_PORT=29500 MASTER_ADDR=${MASTER_ADDR} WORLD_SIZE=${NUM_NODES} NODE_RANK=$
         trainer.params.precision=32 \
         agent.config.ckpt_path="${BEV_CKPT_PATH}" \
         agent.config.vov_ckpt="${VOV_CKPT_PATH}" \
-        +agent.config.freeze_bev=True \
-        agent.config.bev_loss_weight=0.0 \
+        +agent.config.bev_loss_weight=0.0 \
         agent.lr=${lr} \
         cache_path="${CACHE_DIR}" \
         force_cache_computation=false \
