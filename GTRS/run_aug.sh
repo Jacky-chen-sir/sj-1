@@ -18,6 +18,8 @@ bs=6
 max_epochs=17
 
 CACHE_DIR="/mnt/bigdisk/cache_GTRS"
+CACHE_PATH_DEFAULT="/mnt/bigdisk/training_cache_trainval"
+CACHE_PATH="${CACHE_PATH:-$CACHE_PATH_DEFAULT}"
 BEV_CKPT_PATH="$NAVSIM_DEVKIT_ROOT/data/models/gtrs_aug_model.ckpt"
 VOV_CKPT_PATH="$OPENSCENE_DATA_ROOT/models/dd3d_det_final.pth"
 CUDA_VISIBLE_DEVICES=0,1 \
@@ -35,6 +37,6 @@ MASTER_PORT=29500 MASTER_ADDR=${MASTER_ADDR} WORLD_SIZE=${NUM_NODES} NODE_RANK=$
         agent.config.ckpt_path=${BEV_CKPT_PATH} \
         agent.config.vov_ckpt=${VOV_CKPT_PATH} \
         agent.lr=${lr} \
-        cache_path="${CACHE_DIR}" \
+        cache_path="${CACHE_PATH}" \
         force_cache_computation=false \
         use_cache_without_dataset=true

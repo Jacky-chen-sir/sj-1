@@ -28,6 +28,8 @@ from torch.optim.lr_scheduler import LRScheduler, OneCycleLR
 from navsim.agents.abstract_agent import AbstractAgent
 from navsim.agents.dp.dp_config import DPConfig
 from navsim.agents.dp.dp_model import DPModel
+from navsim.agents.gtrs_dense.gtrs_agent import GTRSAgent
+from navsim.agents.gtrs_dense.hydra_config import HydraConfig
 from navsim.agents.gtrs_dense.hydra_features import HydraFeatureBuilder, HydraTargetBuilder
 from navsim.common.dataclasses import SensorConfig
 from navsim.planning.training.abstract_feature_target_builder import (
@@ -80,37 +82,69 @@ class DPAgent(AbstractAgent):
         self.backbone_wd = config.backbone_wd
         self.scheduler = config.scheduler
 
+        # Optional: dense-guided anchor scorer (used only to compute features['anchor_traj'])
+        self._dense_guidance_agent = None
+
     def name(self) -> str:
         """Inherited, see superclass."""
         return self.__class__.__name__
 
     def initialize(self) -> None:
         """Inherited, see superclass."""
-        state_dict: Dict[str, Any] = torch.load(self._checkpoint_path, map_location=torch.device("cpu"))[
-            "state_dict"]
-        self.load_state_dict({k.replace("agent.", ""): v for k, v in state_dict.items()})
+        state_dict: Dict[str, Any] = torch.load(self._checkpoint_path, map_location=torch.device("cpu"))["state_dict"]
+        self.load_state_dict({k.replace("agent.", ""): v for k, v in state_dict.items()}, strict=False)
 
-    def get_sensor_config(self) -> SensorConfig:
-        """Inherited, see superclass."""
-        return SensorConfig(
-            cam_f0=[0, 1, 2, 3],
-            cam_l0=[0, 1, 2, 3],
-            cam_l1=[0, 1, 2, 3],
-            cam_l2=[0, 1, 2, 3],
-            cam_r0=[0, 1, 2, 3],
-            cam_r1=[0, 1, 2, 3],
-            cam_r2=[0, 1, 2, 3],
-            cam_b0=[0, 1, 2, 3],
-            lidar_pc=[],
-        )
+        # Build & load dense scorer if enabled
+        try:
+            gcfg = getattr(self._config, "guidance", None)
+        except Exception:
+            gcfg = None
+        if gcfg is not None and getattr(gcfg, "enable", False):
+            if not gcfg.dense_checkpoint_path:
+                raise ValueError("DP guidance enabled but dense_checkpoint_path is not set")
 
-    def get_target_builders(self) -> List[AbstractTargetBuilder]:
-        return [HydraTargetBuilder(config=self._config)]
+            # Build a dense config by reusing DP's TransfuserConfig fields (seq_len/camera sizes/etc.)
+            dense_cfg = HydraConfig(**self._config.__dict__)
+            if getattr(gcfg, "vov_ckpt", None):
+                dense_cfg.vov_ckpt = gcfg.vov_ckpt
 
-    def get_feature_builders(self) -> List[AbstractFeatureBuilder]:
-        return [HydraFeatureBuilder(config=self._config)]
+            # Default dense vocab (we keep 16384 to match your guided pipeline)
+            if getattr(dense_cfg, "vocab_path", None) is None:
+                navsim_root = os.environ.get("NAVSIM_DEVKIT_ROOT")
+                if navsim_root:
+                    dense_cfg.vocab_path = os.path.join(navsim_root, "traj_final/16384.npy")
+                    dense_cfg.vocab_size = 16384
+
+            self._dense_guidance_agent = GTRSAgent(
+                config=dense_cfg,
+                lr=self._lr,
+                checkpoint_path=gcfg.dense_checkpoint_path,
+                pdm_gt_path=None,
+            )
+            self._dense_guidance_agent.initialize()
 
     def forward(self, features: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        # If enabled, compute anchor_traj via dense scorer and inject into features.
+        if self._dense_guidance_agent is not None:
+            with torch.no_grad():
+                dp_out = self.model(features)
+                dp_proposals = dp_out.get("dp_pred", None)
+                if dp_proposals is not None:
+                    score_out = self._dense_guidance_agent.model.evaluate_dp_proposals(
+                        features,
+                        dp_proposals,
+                        topk=max(1, int(getattr(self._config.guidance, "anchor_topk", 1))),
+                        dp_only_inference=True,
+                    )
+                    anchor_traj = score_out.get("selected_traj", None)
+                    if anchor_traj is None:
+                        anchor_traj = score_out.get("trajectory", None)
+                    if anchor_traj is not None and anchor_traj.dim() == 4:
+                        anchor_traj = anchor_traj[:, 0]
+                    if anchor_traj is not None:
+                        features = dict(features)
+                        features["anchor_traj"] = anchor_traj
+
         return self.model(features)
 
     def compute_loss(
@@ -120,6 +154,14 @@ class DPAgent(AbstractAgent):
             predictions: Dict[str, torch.Tensor],
             tokens=None
     ):
+        # Optional: allow disabling BEV semantic loss for stability/debug.
+        if getattr(self._config, 'disable_bev_loss', False):
+            # Only compute dp loss part.
+            target_traj = targets["trajectory"]
+            dp_loss = self.model._trajectory_head.get_dp_loss(predictions['env_kv'], target_traj.float())
+            dp_loss = dp_loss * self._config.dp_loss_weight
+            return dp_loss, {'dp_loss': dp_loss, 'bev_semantic_loss': torch.zeros((), device=dp_loss.device)}
+
         return dp_loss_bev(targets, predictions, self._config, self.model._trajectory_head)
 
     def get_optimizers(self) -> Union[Optimizer, Dict[str, Union[Optimizer, LRScheduler]]]:
@@ -145,12 +187,26 @@ class DPAgent(AbstractAgent):
             return torch.optim.Adam(params_lr_dict, lr=self._lr, weight_decay=self._config.weight_decay)
         elif self.scheduler == 'cycle':
             optim = torch.optim.Adam(params_lr_dict, lr=self._lr)
+
+            # Allow overriding OneCycleLR behavior from config.
+            # Defaults keep previous behavior if not specified.
+            max_lr = float(getattr(self._config, 'onecycle_max_lr', 0.01))
+            total_steps = int(getattr(self._config, 'onecycle_total_steps', 100 * 202))
+            pct_start = float(getattr(self._config, 'onecycle_pct_start', 0.3))
+            div_factor = float(getattr(self._config, 'onecycle_div_factor', 25.0))
+
+            # If user sets total_steps<=0, fall back to old constant.
+            if total_steps <= 0:
+                total_steps = 100 * 202
+
             return {
                 "optimizer": optim,
                 "lr_scheduler": OneCycleLR(
                     optim,
-                    max_lr=0.01,
-                    total_steps=100 * 202
+                    max_lr=max_lr,
+                    total_steps=total_steps,
+                    pct_start=pct_start,
+                    div_factor=div_factor,
                 )
             }
         else:
@@ -167,3 +223,35 @@ class DPAgent(AbstractAgent):
         return [
             ckpt_callback
         ]
+
+    def get_sensor_config(self) -> SensorConfig:
+        """Inherited, see superclass."""
+        return SensorConfig(
+            cam_f0=[0, 1, 2, 3],
+            cam_l0=[0, 1, 2, 3],
+            cam_l1=[0, 1, 2, 3],
+            cam_l2=[0, 1, 2, 3],
+            cam_r0=[0, 1, 2, 3],
+            cam_r1=[0, 1, 2, 3],
+            cam_r2=[0, 1, 2, 3],
+            cam_b0=[0, 1, 2, 3],
+            lidar_pc=[],
+        )
+
+    def get_target_builders(self) -> List[AbstractTargetBuilder]:
+        # DP training reuses HydraTargetBuilder but passes DPConfig.
+        return [HydraTargetBuilder(config=self._config)]
+
+    def get_feature_builders(self) -> List[AbstractFeatureBuilder]:
+        return [HydraFeatureBuilder(config=self._config)]
+
+    def configure_gradient_clipping(
+        self,
+        optimizer: Optimizer,
+        gradient_clip_val: float = None,
+        gradient_clip_algorithm: str = None,
+    ) -> None:
+        """Optionally clip gradients to stabilize AMP training."""
+        clip_val = float(getattr(self._config, 'grad_clip_val', 0.0) or 0.0)
+        if clip_val > 0:
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=clip_val)

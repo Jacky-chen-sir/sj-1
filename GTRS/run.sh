@@ -2,7 +2,7 @@ export NUPLAN_MAP_VERSION="nuplan-maps-v1.0"
 export NUPLAN_MAPS_ROOT="$HOME/navsim_workspace/dataset/maps"
 export NAVSIM_EXP_ROOT="$HOME/navsim_workspace/exp"
 export NAVSIM_DEVKIT_ROOT="$HOME/navsim_workspace/GTRS"
-export OPENSCENE_DATA_ROOT="/mnt/bigdisk/GTRS/download"
+export OPENSCENE_DATA_ROOT="${OPENSCENE_DATA_ROOT:-/mnt/bigdisk/GTRS/download}"
 export NAVSIM_TRAJPDM_ROOT="$HOME/navsim_workspace/dataset/traj_pdm_v2"
 
 NUM_NODES=1
@@ -15,7 +15,9 @@ lr=0.0002
 bs=6
 max_epochs=17
 
-CACHE_DIR="/mnt/bigdisk/cache_GTRS"
+CACHE_DIR="${CACHE_DIR:-/mnt/bigdisk/cache_GTRS}"
+CACHE_PATH_DEFAULT="/mnt/bigdisk/training_cache_trainval_backview"
+CACHE_PATH="${CACHE_PATH:-$CACHE_PATH_DEFAULT}"
 # Dense (agent) checkpoint
 BEV_CKPT_PATH="$NAVSIM_DEVKIT_ROOT/path/gtrs_dense_vov.ckpt"
 # Perception (VOV/DD3D) backbone checkpoint
@@ -37,6 +39,6 @@ MASTER_PORT=29500 MASTER_ADDR=${MASTER_ADDR} WORLD_SIZE=${NUM_NODES} NODE_RANK=$
         agent.config.vov_ckpt="${VOV_CKPT_PATH}" \
         +agent.config.bev_loss_weight=0.0 \
         agent.lr=${lr} \
-        cache_path="${CACHE_DIR}" \
+        cache_path="${CACHE_PATH}" \
         force_cache_computation=false \
         use_cache_without_dataset=true

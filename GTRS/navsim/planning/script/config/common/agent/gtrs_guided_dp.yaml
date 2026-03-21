@@ -70,9 +70,10 @@ dense_config:
     interval_length: 0.1
 
 # Checkpoints
+# DP checkpoint
 dp_checkpoint_path: null
-# reuse agent.checkpoint_path as dense checkpoint
-checkpoint_path: null
+# Dense checkpoint (GTRS-Dense)
+dense_checkpoint_path: null
 
 # Dense needs this for training loss; in inference it is optional, but keep for completeness
 pdm_gt_path: ${oc.env:OPENSCENE_DATA_ROOT}/traj_pdm_v2/ori/navtrain_16384.pkl

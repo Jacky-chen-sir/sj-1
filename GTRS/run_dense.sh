@@ -2,36 +2,15 @@
 
 set -euo pipefail
 
-# Ensure we run under the correct conda env (needed for hydra/torch/lightning)
-# If already activated, this is a no-op.
-if [ "${CONDA_DEFAULT_ENV-}" != "conda_gtrs" ]; then
-  # Try common conda init locations
-  if [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
-    # shellcheck disable=SC1091
-    source "$HOME/miniconda3/etc/profile.d/conda.sh"
-  elif [ -f "$HOME/anaconda3/etc/profile.d/conda.sh" ]; then
-    # shellcheck disable=SC1091
-    source "$HOME/anaconda3/etc/profile.d/conda.sh"
-  elif command -v conda >/dev/null 2>&1; then
-    eval "$(conda shell.bash hook)"
-  else
-    echo "[FATAL] conda not found. Please install conda or source conda.sh before running." >&2
-    exit 1
-  fi
-
-  conda activate conda_gtrs
-fi
-
-echo "[INFO] Using python: $(which python)" 
-python -c "import hydra; import torch; import pytorch_lightning as pl; print('[INFO] env ok:', hydra.__version__)" >/dev/null
-
 export HYDRA_FULL_ERROR=1
 
 export NUPLAN_MAP_VERSION="nuplan-maps-v1.0"
 export NUPLAN_MAPS_ROOT="$HOME/navsim_workspace/dataset/maps"
 export NAVSIM_EXP_ROOT="$HOME/navsim_workspace/exp"
 export NAVSIM_DEVKIT_ROOT="$HOME/navsim_workspace/GTRS"
-export OPENSCENE_DATA_ROOT="$HOME/navsim_workspace/dataset"
+
+# Dataset root used by configs (default_dataset_paths.yaml uses OPENSCENE_DATA_ROOT).
+export OPENSCENE_DATA_ROOT="${OPENSCENE_DATA_ROOT:-/mnt/bigdisk/GTRS/download}"
 export NAVSIM_TRAJPDM_ROOT="$HOME/navsim_workspace/dataset/traj_pdm_v2"
 
 NUM_NODES=1
@@ -42,23 +21,18 @@ experiment_name=train_dense
 agent=gtrs_dense_vov
 lr=0.0002
 
-# Required by navsim/planning/training/agent_lightning_module.py
-# Use the provided dp predictions pkl in this repo by default.
-export DP_PREDS="${NAVSIM_DEVKIT_ROOT}/data/models/dp_preds.pkl"
-
 # ---- performance knobs (tune here) ----
 # per-GPU batch. start from 12 on 3090 (24GB). if OOM -> 10/8.
 bs=24
 max_epochs=17
-# NOTE: /dev/shm bus error is common on multi-worker dataloaders. Use workers=0 for stability.
-workers=0
-prefetch=1
+# NOTE: too many workers + pin_memory can exhaust /dev/shm and crash with "bus error".
+workers=8
+prefetch=2
 # --------------------------------------
 
-# Dataloader worker debugging (more actionable stack traces)
-export TORCH_SHOW_CPP_STACKTRACES=1
-
-CACHE_DIR="/mnt/bigdisk/cache_GTRS"
+CACHE_DIR="${CACHE_DIR:-/mnt/bigdisk/cache_GTRS}"
+CACHE_PATH_DEFAULT="/mnt/bigdisk/training_cache_trainval_backview"
+CACHE_PATH="${CACHE_PATH:-$CACHE_PATH_DEFAULT}"
 GT_DIR="$HOME/navsim_workspace/dataset/traj_pdm_v2/ori"
 
 # Prefer official locations
@@ -83,6 +57,7 @@ fi
 # Sanity checks (fail fast with clear messages)
 required_paths=(
   "$CACHE_DIR"
+  "$CACHE_PATH"
   "$BEV_CKPT_PATH"
   "$VOV_CKPT_PATH"
   "$GT_DIR/navtrain_16384.pkl"
@@ -121,18 +96,20 @@ MASTER_PORT=29500 MASTER_ADDR=${MASTER_ADDR} WORLD_SIZE=${NUM_NODES} NODE_RANK=$
         train_test_split=navtrain \
         dataloader.params.batch_size=${bs} \
         dataloader.params.num_workers=${workers} \
-        +dataloader.params.persistent_workers=false \
+        +dataloader.params.persistent_workers=true \
         dataloader.params.pin_memory=false \
         +dataloader.params.prefetch_factor=${prefetch} \
         trainer.params.limit_train_batches=1.0 \
         trainer.params.max_epochs=${max_epochs} \
         trainer.params.precision=16-mixed \
+        trainer.params.accelerator=gpu \
+        +trainer.params.devices=2 \
         agent.checkpoint_path="${BEV_CKPT_PATH}" \
         agent.config.vov_ckpt="${VOV_CKPT_PATH}" \
         agent.pdm_gt_path="${GT_DIR}/navtrain_16384.pkl" \
         agent.config.vocab_path="${NAVSIM_DEVKIT_ROOT}/traj_final/16384.npy" \
         +agent.config.freeze_perception=true \
         agent.lr=${lr} \
-        cache_path="${CACHE_DIR}" \
+        cache_path="${CACHE_PATH}" \
         force_cache_computation=false \
         use_cache_without_dataset=true

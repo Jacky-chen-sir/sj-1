@@ -15,7 +15,7 @@
 
 import os
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Tuple, Optional
 
 from nuplan.common.actor_state.tracked_objects_types import TrackedObjectType
 from nuplan.common.maps.abstract_map import SemanticMapLayer
@@ -27,8 +27,30 @@ NAVSIM_DEVKIT_ROOT = os.environ.get("NAVSIM_DEVKIT_ROOT")
 
 
 @dataclass
+class DPGuidanceConfig:
+    """Dense-guided anchor selection config for DP training.
+
+    Only used to compute an `anchor_traj` fed into DPModel (imitation loss unchanged).
+    """
+
+    enable: bool = False
+    dense_checkpoint_path: Optional[str] = None
+    # Dense scorer needs VOV/DD3D backbone ckpt path in its config
+    vov_ckpt: Optional[str] = None
+    anchor_topk: int = 1
+
+
+@dataclass
 class DPConfig(TransfuserConfig):
     scheduler: str = 'default'
+
+    # --- OneCycleLR (used when scheduler == 'cycle') ---
+    # These are optional knobs read by DPAgent.get_optimizers via getattr.
+    # They are defined here so Hydra can pass them without instantiation errors.
+    onecycle_max_lr: float = 0.01
+    onecycle_total_steps: int = 100 * 202
+    onecycle_pct_start: float = 0.3
+    onecycle_div_factor: float = 25.0
 
     num_proposals: int = 100
 
@@ -55,6 +77,9 @@ class DPConfig(TransfuserConfig):
     }
     progress_weight: float = 2.0
     ttc_weight: float = 2.0
+
+    # Dense-guided anchor (optional)
+    guidance: DPGuidanceConfig = DPGuidanceConfig()
 
     inference_imi_weight: float = 0.1
     inference_da_weight: float = 1.0
