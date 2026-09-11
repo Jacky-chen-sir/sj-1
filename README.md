@@ -105,7 +105,56 @@ CKPT=/path/to.ckpt GPU=0 BS=8 WORKERS=8 bash scripts/evaluation/eval_drivesuprim
 | AUG + FM-DP 融合（本文） | 0.7935 |
 | 官方 AUG（参考上限） | 0.7939 |
 
-## 6. 主要改动目录
+## 6. OPD 蒸馏（第 4 章）
+
+教师 = 冻结 ViT-L（87.1），**离线打分、训练时完全不前向**；学生 = R34，三路蒸馏损失
+（imi 分布 KL + 8 头逐轨迹二元 KL + 融合分数 listwise/召回）。与上面 §3 的 AUG 训练互斥（`ban_soft_label_loss` 已强制）。
+
+### 三步跑法（远程 3×3090）
+
+```bash
+# 1) 教师打分缓存（一次性，navtrain ~103k token：含 8 头约 20GB；OPD_STORE_HEADS=0 则 ~6.8GB）
+#    磁盘紧张时用 OPD_STORE_HEADS=0 并把 OPD_LAMBDA_HEAD=0（否则那一路自动置零，白填权重）
+export OPD_TEACHER_SCORE_DIR=$NAVSIM_TRAJPDM_ROOT/opd/teacher/vit_l/8192_cache_ori
+TEACHER_CKPT=$NAVSIM_EXP_ROOT/models/gtrs_aug_drivesuprim_vit/epoch=05-step=1330.ckpt \
+NPROC=3 bash scripts/opd/training/cache_teacher.sh
+
+# 2) 训练（主实验 rounds=0 即可跑）
+OPD_TEACHER_SCORE_DIR=$OPD_TEACHER_SCORE_DIR \
+bash scripts/opd/training/train_opd.sh gtrs_aug_opd_r34 1 3 256
+
+# 3) 评估（按文件名 glob ckpt，不再算 step=epoch*1330）
+bash scripts/opd/evaluation/eval_opd.sh 5 \
+  training/opd/gtrs_aug_opd_r34/rot_30-p_0.5/stage_layers_3-topks_256 1 3 256
+```
+
+### OPD 训练旋钮（`OPD_*` env → `++agent.config.opd.*`）
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `OPD_TEACHER_SCORE_DIR` | `$NAVSIM_TRAJPDM_ROOT/opd/...` | 教师缓存目录（必填；否则用 yaml 默认） |
+| `OPD_TAU_IMI / _HEAD / _LIST` | 2.0 | 三路蒸馏温度（imi / 8-PDM 头 / 融合分数 listwise） |
+| `OPD_LAMBDA_IMI / _HEAD / _REFINE / _RECALL` | 1.0/1.0/1.0/0.5 | 四路损失权重（消融逐个置 0） |
+| `OPD_TOPK_REFINE / _RECALL` | 256 / 32 | 精排 listwise 与召回的 Top-K |
+| `OPD_ON_POLICY_ROUNDS / _WEIGHT` | 0 / 0.5 | on-policy 轮数与权重（0=关） |
+| `OPD_ON_POLICY_VIEW_IDX` | 1 | on-policy 缓存配对的学生视图下标；与缓存 `view_idx` 双向断言 |
+| `OPD_STORE_HEADS` | 1 | 教师缓存是否含 8 头 logits；**须与 `cache_teacher.sh` 一致**，为 0 时 `lambda_head` 自动置零 |
+| `OPD_TEACHER_MODE` | offline | `offline`（读缓存）/ `ema`（原在线软标签教师，消融对照）/ `none`（同路径纯学生基线） |
+| `BS` / `NPROC` / `ACCUM` | 3 / 3 / 4 | 有效批量 = 三者乘积；LR 自动线性缩放（基线 7.5e-5 @ 64） |
+| `PRECISION` | 32 | **必须 32**；`sync_batchnorm` 已开 |
+
+### 消融 sweep
+
+```bash
+# 全量；或 DRY_RUN=1 先看命令
+bash scripts/opd/ablation/sweep_opd.sh
+GROUPS="default im_only tau_imi_1 rounds_1" bash scripts/opd/ablation/sweep_opd.sh
+```
+
+组名见 `scripts/opd/ablation/sweep_opd.sh` 顶部注释（λ 独立性 / τ / λ 组合 / on-policy 轮数 / EMA 对照）。
+词表规模消融（4096/16384）需重算 PDM 分数与教师缓存，不在 sweep 里做。
+
+
 
 | 路径 | 内容 |
 |---|---|
@@ -113,6 +162,10 @@ CKPT=/path/to.ckpt GPU=0 BS=8 WORKERS=8 bash scripts/evaluation/eval_drivesuprim
 | `navsim/agents/gtrs_aug/` | AUG 评分模型；`hydra_backbone.py` 已移植多骨干（R34/R50/ViT/VoV） |
 | `navsim/agents/tools/` | 离线标签/词表分数生成脚本 |
 | `navsim/planning/script/run_training_aug.py` | AUG 训练入口 |
+| `navsim/planning/script/run_teacher_opd_cache.py` | OPD 教师离线打分缓存工具（流式 per-token 写盘，无 gather） |
+| `navsim/agents/gtrs_aug/hydra_loss_fn_aug.py` | `opd_distill_loss`——三路蒸馏（imi-KL + 8头 BCE-soft + 融合 listwise/召回） |
+| `navsim/agents/gtrs_aug/tests/test_opd.py` | 数值回归测试（远程 `python -m pytest navsim/agents/gtrs_aug/tests/test_opd.py -q`） |
+| `scripts/opd/` | OPD 训练/缓存/评估/消融脚本（镜像 `drivesuprim/` 结构） |
 | `scripts/drivesuprim/` | DriveSuprim 配方训练/评测脚本 |
 | `scripts/evaluation/` | navtest 评测与融合推理脚本 |
 | `traj_final/` | 轨迹词表（8192/16384）与聚类脚本 |

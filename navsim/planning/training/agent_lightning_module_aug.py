@@ -84,6 +84,17 @@ class AgentLightningModuleAug(pl.LightningModule):
                      sync_dist=True)
             loss = loss + loss_soft_teacher[0]
 
+        # 只有 offline 模式才读教师缓存：'ema' 走原在线软标签教师（上面的 loss-soft 分支），
+        # 'none' 是纯学生基线。这两种模式下 teacher_score_dir 被 sync 清成 None，
+        # 若仍进这个分支，`os.path.join(None, ...)` 会 TypeError。
+        if self._cfg.opd.enable and self._cfg.opd.teacher_mode == 'offline':
+            loss_opd, loss_opd_dict = self.agent.compute_loss_distill(features, targets, student_preds, tokens)
+            for k, v in loss_opd_dict.items():
+                self.log(f"{logging_prefix}/{k}-opd", v, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
+            self.log(f"{logging_prefix}/loss-opd", loss_opd, on_step=True, on_epoch=True, prog_bar=True,
+                     sync_dist=True)
+            loss = loss + loss_opd
+
         if self._cfg.refinement.use_multi_stage:
             loss_refinement = self.agent.compute_loss_multi_stage(features, targets, student_preds, tokens)
 

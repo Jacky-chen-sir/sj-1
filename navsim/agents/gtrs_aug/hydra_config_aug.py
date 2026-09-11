@@ -14,8 +14,8 @@
 # limitations under the License.
 
 import os
-from dataclasses import dataclass
-from typing import Tuple
+from dataclasses import dataclass, field
+from typing import Optional, Tuple
 
 from nuplan.common.actor_state.tracked_objects_types import TrackedObjectType
 from nuplan.common.maps.abstract_map import SemanticMapLayer
@@ -42,6 +42,44 @@ def sync_drivesuprim_config_aliases(config: "HydraConfigAug") -> "HydraConfigAug
 
     if config.refinement.refinement_approach == "transformer_decoder":
         config.refinement.use_offset_refinement_v2 = False
+
+    # OPD：先把 hydra `--convert all` 下的 dict 强制挽回 dataclass（`++agent.config.opd.*`
+    # 在无 `_target_` 块的 yaml 上会把 opd 变成普通 dict，随后点属性访问必崩）。
+    if getattr(config, "opd", None) is not None and not isinstance(config.opd, OPDConfig):
+        config.opd = OPDConfig(**dict(config.opd))
+
+    if config.opd is not None and config.opd.enable:
+        assert config.opd.teacher_mode in ("offline", "ema", "none"), (
+            f"opd.teacher_mode 只能是 offline/ema/none，收到 {config.opd.teacher_mode!r}")
+        if config.opd.teacher_mode == "offline":
+            # 离线蒸馏与原在线软标签教师互斥：离线教师不存在，
+            # 若仍开着 compute_loss_soft_teacher 会对 teacher_pred=None 下标直接崩。
+            config.lab.ban_soft_label_loss = True
+            # 离线训练 ckpt 没有 teacher.*，若 inference 还指向 teacher，eval 会静默
+            # 用随机初始化的 teacher 输出垃圾分数。强制 student（B3）。
+            config.inference.model = "student"
+            # fused_coarse_score 的非 safe 分支走 `softmax(-1).log()` / `sigmoid().log()`，
+            # 词表里必然存在被压到下溢的条目 → -inf。蒸馏要对这个张量做 gather/log_softmax，
+            # -inf 会经 `0 * -inf` 变 NaN（valid=0 的样本尤其）。OPD 下必须走 safe 版。
+            config.opd.safe_fused_score = True
+            assert not config.lab.optimize_prev_frame_traj_for_ec, (
+                "optimize_prev_frame_traj_for_ec requires an in-process teacher; incompatible with OPD offline.")
+            if config.training:
+                assert config.opd.teacher_score_dir, (
+                    "OPD offline 训练需要 agent.config.opd.teacher_score_dir 指向教师 per-token pickle 目录。")
+                if config.opd.on_policy_rounds > 0:
+                    assert config.opd.teacher_onpolicy_score_dir, (
+                        "on_policy_rounds>0 需要 opd.teacher_onpolicy_score_dir")
+        elif config.opd.teacher_mode == "ema":
+            # EMA 自蒸馏对照（消融 B1）：恢复原在线软标签教师，完全不读缓存。
+            # 不能 assert teacher_score_dir is None——sweep 复用同一份 yaml，该键总是被写上；
+            # 这里直接清空，保证 `_load_teacher_score` 不会被误调用。
+            config.opd.teacher_score_dir = None
+            config.opd.teacher_onpolicy_score_dir = None
+            config.lab.ban_soft_label_loss = False
+        else:  # "none"：纯学生基线，但走与 OPD 完全相同的代码路径（λ=0 的同路径对照）
+            config.opd.teacher_score_dir = None
+            config.opd.teacher_onpolicy_score_dir = None
     return config
 
 
@@ -170,6 +208,49 @@ class LabConfig:
     ema_momentum_start: float = 0.99
     update_buffer_in_ema: bool = False
     save_pickle: bool = False
+
+
+@dataclass
+class OPDConfig:
+    """OPD 离线蒸馏（论文第 4 章）。
+
+    教师 = 冻结的 ViT-L，离线打分、per-token 缓存；学生 = R34，训练时教师完全不前向。
+    teacher_mode='offline' 时由 sync_drivesuprim_config_aliases 强制关掉在线软标签教师。
+    """
+    enable: bool = False
+    teacher_mode: str = "offline"          # offline | ema | none   (ema = 复现原行为，作消融对照)
+    teacher_score_dir: Optional[str] = None         # per-token pickle 目录（原视图）
+    teacher_onpolicy_score_dir: Optional[str] = None  # per-token pickle 目录（on-policy 视图）
+
+    # 温度按头类型拆分：imi 是 8192-way softmax，PDM 头是逐轨迹 Bernoulli(sigmoid)，
+    # 融合分数是 log 空间且跨度 ~100 nats，三者有效区间不同，不能共用一个 tau。
+    tau_imi: float = 2.0                   # 粗筛 imi 分布蒸馏
+    tau_head: float = 2.0                  # 8 个 PDM 头的逐轨迹二元 KL
+    tau_list: float = 2.0                  # 精排/召回 listwise（基于融合分数）
+
+    lambda_imi: float = 1.0                # 粗筛 imi 分布蒸馏
+    lambda_head: float = 1.0               # 8 个 PDM 头逐轨迹二元 KL
+    lambda_refine: float = 1.0             # 精排 listwise（教师 Top-K 子集上的融合分数）
+    lambda_recall: float = 0.5             # 召回集合监督（教师 Top-K' 质量不低于阈值）
+
+    topk_refine: int = 256                 # 精排 listwise 的 Top-K（≤ 教师缓存落盘的 topk，超出会被截断）
+    topk_recall: int = 32                  # 召回集合监督的 Top-K
+
+    # **默认 False**：`opd` 是 field(default_factory=OPDConfig)，永不为 None，所以这个默认值
+    # 会落到所有 gtrs_aug agent（含 baseline `gtrs_aug_drivesuprim_r34/_vit`）的 eval 上。
+    # 默认 True 会静默改掉既有 ckpt 的融合分数公式（safe 版与原版不 bit-wise 相等）。
+    # OPD offline 下由 sync_drivesuprim_config_aliases 强制置 True。
+    safe_fused_score: bool = False
+    # 教师缓存是否包含 8 头 logits。False 时训练端自动把 lambda_head 路置零（valid_head=0），
+    # 不会 KeyError；缓存工具侧由 OPD_STORE_HEADS 控制，两边必须一致。
+    store_heads: bool = True
+
+    on_policy_rounds: int = 0              # 0 = 关闭该分支
+    on_policy_weight: float = 0.5
+    # on-policy 教师是在「旋转了 -dθ 的观测」上打分的，所以必须配对学生**同一旋转**的视图，
+    # 不能配 predictions[0]（原视图）。collect 脚本把 dθ 写进 offline_aug_file 的 view 0，
+    # 对应学生 predictions[1]。缓存 payload 里的 view_idx 会与这个值做一致性断言。
+    on_policy_view_idx: int = 1
 
 
 @dataclass
@@ -355,6 +436,7 @@ class HydraConfigAug(TransfuserConfig):
     inference: InferConfig = InferConfig()
 
     lab: LabConfig = LabConfig()
+    opd: OPDConfig = field(default_factory=OPDConfig)
 
     def __post_init__(self):
         sync_drivesuprim_config_aliases(self)

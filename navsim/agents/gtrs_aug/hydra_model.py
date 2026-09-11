@@ -29,6 +29,43 @@ from sklearn.cluster import KMeans
 from navsim.agents.utils.attn import MemoryEffTransformer
 
 
+def fused_coarse_score(head_out: Dict[str, torch.Tensor], config: HydraConfigAug, *, safe: bool) -> torch.Tensor:
+    """把 9 个打分头的输出融合成粗筛分数 `[B, vocab_size]`。
+
+    由 `HydraTrajHead.forward` 原 :295-306 的内联表达式抽取，保证位级一致的复现性。
+    - `safe=False`：逐字符复刻原式（`softmax.log()` / `sigmoid().log()`），eval 基线数字不变。
+    - `safe=True`：数值安全版（`log_softmax` / `logsigmoid` / 内层 `clamp_min`），
+      供 OPD 蒸馏的 KL 使用，避免 fp32 下溢产生 `-inf` → `0 * (-inf) = NaN`。
+    """
+    if safe:
+        import torch.nn.functional as F
+        ttc = F.logsigmoid(head_out['time_to_collision_within_bound'])
+        ep = F.logsigmoid(head_out['ego_progress'])
+        lk = F.logsigmoid(head_out['lane_keeping'])
+        comfort = F.logsigmoid(head_out['history_comfort'])
+        inner = (5.0 * ttc.exp() + 5.0 * ep.exp() + 2.0 * lk.exp() + 1.0 * comfort.exp()).clamp_min(1e-6).log()
+        return (
+            0.02 * F.log_softmax(head_out['imi'], dim=-1)
+            + 0.1 * F.logsigmoid(head_out['traffic_light_compliance'])
+            + 0.5 * F.logsigmoid(head_out['no_at_fault_collisions'])
+            + 0.5 * F.logsigmoid(head_out['drivable_area_compliance'])
+            + 0.3 * F.logsigmoid(head_out['driving_direction_compliance'])
+            + 6.0 * inner
+        )
+    return (
+        0.02 * head_out['imi'].softmax(-1).log()
+        + 0.1 * head_out['traffic_light_compliance'].sigmoid().log()
+        + 0.5 * head_out['no_at_fault_collisions'].sigmoid().log()
+        + 0.5 * head_out['drivable_area_compliance'].sigmoid().log()
+        + 0.3 * head_out['driving_direction_compliance'].sigmoid().log()
+        + 6.0 * (5.0 * head_out['time_to_collision_within_bound'].sigmoid()
+                 + 5.0 * head_out['ego_progress'].sigmoid()
+                 + 2.0 * head_out['lane_keeping'].sigmoid()
+                 + 1.0 * head_out['history_comfort'].sigmoid()
+                 ).log()
+    )
+
+
 class HydraModel(nn.Module):
     def __init__(self, config: HydraConfigAug):
         super().__init__()
@@ -292,18 +329,9 @@ class HydraTrajHead(nn.Module):
         for k, head in self.heads.items():
             result[k] = head(dist_status).squeeze(-1)
 
-        scores = (
-                0.02 * result['imi'].softmax(-1).log() +
-                0.1 * result['traffic_light_compliance'].sigmoid().log() +
-                0.5 * result['no_at_fault_collisions'].sigmoid().log() +
-                0.5 * result['drivable_area_compliance'].sigmoid().log() +
-                0.3 * result['driving_direction_compliance'].sigmoid().log() +
-                6.0 * (5.0 * result['time_to_collision_within_bound'].sigmoid() +
-                       5.0 * result['ego_progress'].sigmoid() +
-                       2.0 * result['lane_keeping'].sigmoid() +
-                       1.0 * result['history_comfort'].sigmoid()
-                       ).log()
-        )
+        # safe 默认 False：保证既有 ckpt 的 eval 数字 bit-wise 不变；OPD 训练时置 True 走数值安全版。
+        _safe = bool(self._config.opd.safe_fused_score) if getattr(self._config, 'opd', None) is not None else False
+        scores = fused_coarse_score(result, self._config, safe=_safe)
 
         selected_indices = scores.argmax(1)
         scene_cnt_tensor = torch.arange(B, device=scores.device)
@@ -313,6 +341,8 @@ class HydraTrajHead(nn.Module):
             result["trajectory"] = vocab[scene_cnt_tensor, selected_indices].view(B, HORIZON, 3)
         result["trajectory_vocab"] = self.vocab.data
         result["selected_indices"] = selected_indices
+        # 导出粗筛融合分数（OPD 蒸馏用；推理侧只按固定 key 取值，多一个 key 无副作用）
+        result['coarse_fused_score'] = scores
 
         if self._config.refinement.use_multi_stage:
             topk_str = str(self._config.refinement.topks)

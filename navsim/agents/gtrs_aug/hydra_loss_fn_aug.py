@@ -266,3 +266,103 @@ def hydra_kd_imi_agent_loss_single_stage(
 def three_to_two_classes(x):
     x[x == 0.5] = 0.0
     return x
+
+
+# 8 个 PDM 头的名字按 yaml 的 `metrics:` 列表顺序（HydraConfigAug.trajectory_pdm_weight 的键）
+_PDM_HEADS = (
+    'no_at_fault_collisions', 'drivable_area_compliance', 'time_to_collision_within_bound',
+    'ego_progress', 'driving_direction_compliance', 'lane_keeping',
+    'traffic_light_compliance', 'history_comfort',
+)
+
+
+def opd_distill_loss(student_pred: Dict[str, torch.Tensor], teacher_cache: Dict[str, torch.Tensor],
+                     config: HydraConfigAug):
+    """OPD 三路蒸馏，返回 (total, dict)。
+
+    三路全部可独立置零（对应消融的 λ 独立性与 on/off 开关）：
+      1. imi 分布蒸馏：`KL(softmax(s_imi/τ_imi) ‖ softmax(t_imi/τ_imi)) · τ_imi²`
+      2. 8 头逐轨迹二元 KL：`KL(Bern(σ(t/τ_h)) ‖ Bern(σ(s/τ_h)))`，逐元素按 trajectory_pdm_weight 加权
+      3. 精排 listwise（教师 Top-K 子集上的融合分数）+ 召回集合监督（教师 Top-K' 内部的 logsumexp）
+
+    约定（与教师缓存 `run_teacher_opd_cache.py` 对齐）：
+      - teacher_cache['valid']: [B] float，0=该 token 的缓存缺失/损坏。乘 0 而非跳过分支，
+        否则 DDP static_graph 会因某 step 少走一条 loss 分支而 RuntimeError。
+      - teacher_cache['valid_head']: [B] float，0=该 token 的缓存不含 8 头 logits
+        （`OPD_STORE_HEADS=0`）。第 2 路按这个 mask 置零，其余两路不受影响。
+      - teacher_cache['coarse']: [B, V] 数值安全融合分数（必须是 safe 版；非 safe 版含 -inf）。
+      - teacher_cache['imi'] / 8 个 per-head 键：[B, V] 原始 logits（**顶层逐头键**，
+        不是一个堆叠数组——落盘端 `run_teacher_opd_cache.py` 必须与此一致）。
+      - 全部内部 `.float()`，杜绝 16-mixed 未来把 log_softmax/logsumexp 掉精度。
+    """
+    from navsim.agents.gtrs_aug.hydra_model import fused_coarse_score
+
+    opd = config.opd
+    device = student_pred['imi'].device
+    valid = teacher_cache['valid'].float().to(device).view(-1)          # [B]
+    n_valid = valid.sum().clamp(min=1.0)                                # 避免除 0
+    # 8 头 logits 是可选缓存（OPD_STORE_HEADS）。缺失时这一路按样本置零，而不是 KeyError。
+    valid_head = teacher_cache.get('valid_head')
+    valid_head = valid if valid_head is None else valid_head.float().to(device).view(-1) * valid
+    n_valid_head = valid_head.sum().clamp(min=1.0)
+
+    def masked_mean(per_sample):                                        # [B] -> scalar，乘 mask 而非跳过
+        return (per_sample * valid).sum() / n_valid
+
+    def masked_mean_head(per_sample):
+        return (per_sample * valid_head).sum() / n_valid_head
+
+    out: Dict[str, torch.Tensor] = {}
+
+    # ---------- 1. imi 分布蒸馏（前向 KL，均值=batchmean，乘 τ²） ----------
+    s_log_imi = F.log_softmax(student_pred['imi'].float() / opd.tau_imi, dim=-1)      # [B,V]
+    t_log_imi = F.log_softmax(teacher_cache['imi'].float().to(device) / opd.tau_imi, dim=-1)
+    loss_imi = F.kl_div(s_log_imi, t_log_imi, reduction='none', log_target=True).sum(-1) * (opd.tau_imi ** 2)
+    out['distill_imi'] = masked_mean(loss_imi)
+
+    # ---------- 2. 8 个 PDM 头逐轨迹二元 KL（等价 F.binary_cross_entropy_with_logits(t_logit, σ(s))），logsigmoid 安全化 ----------
+    loss_head = torch.zeros(student_pred['imi'].shape[0], device=device)
+    w = config.trajectory_pdm_weight
+    for name in _PDM_HEADS:
+        t_logit = teacher_cache[name].float().to(device) / opd.tau_head   # 教师 logit，当 soft 目标温度
+        s_logit = student_pred[name].float() / opd.tau_head
+        # BCE-with-soft-target(s_logit, σ(t_logit)) * τ² 即逐轨迹 Bernoulli KL 的原值
+        bce = F.binary_cross_entropy_with_logits(s_logit, torch.sigmoid(t_logit), reduction='none')  # [B,V]
+        kl = bce.mean(-1) * (opd.tau_head ** 2) * float(w.get(name, 1.0))
+        loss_head = loss_head + kl
+        out[f'distill_head_{name}'] = masked_mean_head(kl)
+    out['distill_head'] = masked_mean_head(loss_head)
+
+    # ---------- 3a. 精排 listwise：教师 Top-K 子集上、师生双方都用粗筛融合分数做 listwise ----------
+    # （不练精排头：学生精排分数的索引空间是它自己的 top-K，与教师 topk_idx 对不齐，见评审 7.3）
+    student_fused = student_pred['coarse_fused_score'].float()          # [B,V]
+    t_idx = teacher_cache['topk_idx'].long().to(device)                 # [B,K_cached]
+    # topk_refine 是一个**消融旋钮**：落盘 K 固定（256），这里截断出实际参与 listwise 的长度。
+    # 不截断的话 opd.topk_refine 就是个 no-op，消融表里那几行会完全一样。
+    k_refine = max(1, min(int(opd.topk_refine), t_idx.shape[1]))
+    t_idx = t_idx[:, :k_refine]
+    t_fused = teacher_cache['coarse'].float().to(device)                # [B,V]
+    s_top = torch.gather(student_fused, 1, t_idx) / opd.tau_list        # [B,K]
+    t_top = torch.gather(t_fused, 1, t_idx) / opd.tau_list              # [B,K]
+    s_log_top = F.log_softmax(s_top, dim=-1)
+    t_log_top = F.log_softmax(t_top, dim=-1)
+    loss_refine = F.kl_div(s_log_top, t_log_top, reduction='none', log_target=True).sum(-1) * (opd.tau_list ** 2)
+    out['distill_refine'] = masked_mean(loss_refine)
+
+    # ---------- 3b. 召回：教师 Top-K' 内部的学生质量 logsumexp ----------
+    k_recall = max(1, min(int(opd.topk_recall), t_idx.shape[1]))
+    t_idx_recall = t_idx[:, :k_recall]
+    # 与 listwise 同温度：融合分数是 log 空间、跨度 ~100 nats，不除 tau 的话 softmax 几乎是
+    # one-hot，recall_mass 要么 ≈0 要么 ≈-100，梯度只在极少数样本上有效。
+    log_p_s = F.log_softmax(student_fused / opd.tau_list, dim=-1)       # [B,V]
+    recall_mass = torch.logsumexp(torch.gather(log_p_s, 1, t_idx_recall), dim=-1)  # [B]
+    loss_recall = -recall_mass
+    out['distill_recall'] = masked_mean(loss_recall)
+
+    total = (opd.lambda_imi * out['distill_imi']
+             + opd.lambda_head * out['distill_head']
+             + opd.lambda_refine * out['distill_refine']
+             + opd.lambda_recall * out['distill_recall'])
+    total = total + 0.0 * student_fused.sum()  # 保持计算图连通（valid 全 0 时 DDP static_graph 不报错）
+    out['loss_opd'] = total
+    return total, out

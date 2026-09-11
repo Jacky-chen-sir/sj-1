@@ -17,7 +17,7 @@ import json
 import logging
 import os
 import pickle
-from typing import Any, Union
+from typing import Any, Optional, Union
 from typing import Dict, List
 
 import numpy as np
@@ -33,9 +33,79 @@ from navsim.agents.abstract_agent import AbstractAgent
 from navsim.agents.gtrs_aug.aug_meta_arch import AugMetaArch
 from navsim.agents.gtrs_aug.hydra_config_aug import HydraConfigAug, sync_drivesuprim_config_aliases
 from navsim.agents.gtrs_aug.hydra_features_aug import HydraAugFeatureBuilder, HydraAugTargetBuilder
-from navsim.agents.gtrs_aug.hydra_loss_fn_aug import hydra_kd_imi_agent_loss_robust, \
+from navsim.agents.gtrs_aug.hydra_loss_fn_aug import hydra_kd_imi_agent_loss_robust, opd_distill_loss, \
     hydra_kd_imi_agent_loss_single_stage
 from navsim.agents.gtrs_aug.hydra_model import HydraModel
+
+_OPD_PDM_HEAD_KEYS = ('no_at_fault_collisions', 'drivable_area_compliance',
+                      'time_to_collision_within_bound', 'ego_progress', 'driving_direction_compliance',
+                      'lane_keeping', 'traffic_light_compliance', 'history_comfort')
+# 三路损失都必须有的键（见 `opd_distill_loss`）。8 个 PDM 头是可选的：教师缓存
+# 不带 heads 时把 head 那一路整体置零，而不是 KeyError。
+_OPD_REQUIRED_KEYS = ('imi', 'coarse', 'topk_idx')
+
+
+def _ops_teacher_to_tensors(items: List[Optional[Dict[str, Any]]], device,
+                            vocab_size: int, topk: int,
+                            expect_safe_fused: bool = True) -> Dict[str, torch.Tensor]:
+    """把 per-token 教师缓存列表堆成本 batch 的张量字典。
+
+    - `valid` [B]：该 token 的必需键是否齐全。缺失样本以零张量占位，损失端乘 0。
+    - `valid_head` [B]：该 token 是否还带了 8 个 PDM 头（`OPD_STORE_HEADS=1`）。
+
+    **不 assert "整 batch 全缺失"**：训练跑在 `DDPStrategy(static_graph=True, timeout=3600s)`
+    下，某个 rank 抛异常不会让别的 rank 同步失败，而是所有人卡在 NCCL allreduce 上等满
+    1 小时才超时。整 batch 缺失时返回全 0 的 valid + 零张量，损失为 0、计算图仍连通。
+    """
+    out: Dict[str, torch.Tensor] = {}
+
+    def has(it, keys):
+        return it is not None and all(k in it for k in keys)
+
+    ok = [has(it, _OPD_REQUIRED_KEYS) for it in items]
+    ok_head = [ok[i] and has(items[i], _OPD_PDM_HEAD_KEYS) for i in range(len(items))]
+    out['valid'] = torch.tensor([1.0 if f else 0.0 for f in ok], dtype=torch.float32, device=device)
+    out['valid_head'] = torch.tensor([1.0 if f else 0.0 for f in ok_head], dtype=torch.float32, device=device)
+
+    if not any(ok):
+        logger.warning(
+            "整个 batch (%d 个 token) 的 OPD 教师缓存都缺失/不完整；本 step 蒸馏损失置 0。"
+            "若持续出现请检查 teacher_score_dir 是否已生成完毕。", len(items))
+
+    ref = next((items[i] for i in range(len(items)) if ok[i]), None)
+    if ref is not None and expect_safe_fused and 'safe_fused_score' in ref:
+        assert bool(ref['safe_fused_score']), (
+            "教师缓存是用 opd.safe_fused_score=false 生成的（coarse 含 -inf），"
+            "与训练端强制的 safe 版融合分数公式不一致；必须用 safe=true 重跑缓存")
+
+    def stack(key, dtype, shape, valid_flags):
+        vals = []
+        for i, it in enumerate(items):
+            if valid_flags[i]:
+                t = torch.from_numpy(np.asarray(it[key]).copy())
+            else:
+                t = torch.zeros(shape)
+            vals.append(t.to(dtype))
+        return torch.stack(vals, 0).to(device)
+
+    # 零占位张量必须和真实缓存同形，否则 torch.stack 直接炸。K 以缓存里的实际长度为准
+    # （opd.topk_refine 只在损失端做截断，不要求与落盘 K 相等）。
+    if ref is not None:
+        topk = int(np.asarray(ref['topk_idx']).shape[-1])
+        assert int(np.asarray(ref['coarse']).shape[-1]) == int(vocab_size), (
+            f"教师缓存 coarse 维度 {np.asarray(ref['coarse']).shape[-1]} != config.vocab_size {vocab_size}")
+    v_shape, k_shape = (vocab_size,), (topk,)
+    for k in ('imi', 'coarse'):
+        out[k] = stack(k, torch.float32, v_shape, ok)
+    out['topk_idx'] = stack('topk_idx', torch.int64, k_shape, ok)
+    for k in _OPD_PDM_HEAD_KEYS:
+        out[k] = stack(k, torch.float32, v_shape, ok_head)
+    if ref is not None and 'topk_score' in ref:
+        out['topk_score'] = stack('topk_score', torch.float32, k_shape, ok)
+    out['view_idx'] = torch.tensor(
+        [-1 if not ok[i] else int(items[i].get('view_idx', 0)) for i in range(len(items))],
+        dtype=torch.long, device=device)
+    return out
 from navsim.common.dataclasses import SensorConfig
 from navsim.planning.training.abstract_feature_target_builder import (
     AbstractFeatureBuilder,
@@ -80,8 +150,17 @@ class GTRSAugAgent(AbstractAgent):
         self._lr = lr
         self.metrics = metrics
         self._checkpoint_path = checkpoint_path
-        teacher_model = HydraModel(config)
-        student_model = HydraModel(config)
+        # OPD 离线蒸馏：训练时不建教师、不跑教师、不做 EMA，teacher_model=None。
+        # teacher_mode='ema' 才复现原在线软标签教师（消融对照）。
+        opd = getattr(config, 'opd', None)
+        opd_offline = opd is not None and opd.enable and opd.teacher_mode == 'offline'
+        if opd_offline:
+            teacher_model = None
+            student_model = HydraModel(config)
+        else:
+            teacher_model = HydraModel(config)
+            student_model = HydraModel(config)
+        self._opd_offline = opd_offline
         self.model = AugMetaArch(config, teacher_model, student_model)
         self.vocab_size = config.vocab_size
         self.backbone_wd = config.backbone_wd
@@ -98,8 +177,86 @@ class GTRSAugAgent(AbstractAgent):
             assert aug_data['param']['rot'] == config.ego_perturb.rotation.offline_aug_angle_boundary
             self.aug_info = aug_data['tokens']
 
+            if config.opd.enable and config.opd.teacher_mode == 'offline':
+                assert config.opd.teacher_score_dir, (
+                    "opd.enable 且 teacher_mode='offline' 时必须配置 opd.teacher_score_dir"
+                )
+                assert os.path.isdir(config.opd.teacher_score_dir), (
+                    f"opd.teacher_score_dir 不存在：{config.opd.teacher_score_dir}"
+                )
+                # 启动时抽样校验缓存的元信息（词表 sha + offline_aug_file sha），
+                # 否则换一份 8192.npy（与 test_8192_kmeans.npy 同尺寸但内容不同）会静默错位 Top-K。
+                self._teacher_score_meta = self._load_teacher_meta(config.opd.teacher_score_dir)
+                self._expected_vocab_sha1 = self._sha1_file_prefix(config.vocab_path)
+                self._expected_offline_aug_sha1 = self._sha1_file_prefix(config.ego_perturb.offline_aug_file)
+
         self.only_ori_input = config.only_ori_input
         self.n_rotation_crop = config.student_rotation_ensemble
+
+    @staticmethod
+    def _sha1_file_prefix(path: Optional[str], nbytes: int = 4096) -> str:
+        import hashlib
+        if not path:
+            return ""
+        with open(path, 'rb') as f:
+            buf = f.read(nbytes)
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            size = -1
+        return hashlib.sha1(buf + str(size).encode()).hexdigest()
+
+    def _load_teacher_meta(self, score_dir: str) -> Dict[str, Any]:
+        """读取教师缓存目录里第一份 pickle 的元字段；没有元字段则按空 dict 返回（向后兼容旧缓存）。"""
+        try:
+            sample = next(f for f in os.listdir(score_dir) if f.endswith('.pkl'))
+        except StopIteration:
+            logger.warning("opd.teacher_score_dir=%s is empty; every token will be valid=0", score_dir)
+            return {}
+        with open(os.path.join(score_dir, sample), 'rb') as f:
+            data = pickle.load(f)
+        if not isinstance(data, dict):
+            logger.warning("teacher cache %s is not a dict (legacy format); skipping meta validation", sample)
+            return {}
+        return {k: data[k] for k in ('vocab_sha1', 'vocab_size', 'offline_aug_file_sha1') if k in data}
+
+    def _load_teacher_score(self, token: str, score_dir: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """per-token 懒加载教师蒸馏缓存；缺失/损坏返回 None（由调用方把该样本 valid 置 0）。
+
+        不做任何 fallback——蒸馏信号缺失（置 0）比蒸馏错目标安全。
+        第一次命中有效缓存时校验元信息（vocab_sha1 / offline_aug_file_sha1），不一致直接 raise。
+        默认读原视图目录；on-policy 目录用 score_dir 显式传入。
+        """
+        if score_dir is None:
+            score_dir = self._config.opd.teacher_score_dir
+        path = os.path.join(score_dir, f"{token}.pkl")
+        try:
+            with open(path, "rb") as f:
+                data = pickle.load(f)
+        except Exception as e:
+            logger.warning(
+                "Missing/corrupt OPD teacher cache for token=%s (%s: %s); this sample gets valid=0",
+                token, type(e).__name__, e,
+            )
+            return None
+        if not getattr(self, '_teacher_meta_checked', False):
+            v_sha = data.get('vocab_sha1')
+            v_size = data.get('vocab_size')
+            aug_sha = data.get('offline_aug_file_sha1')
+            if v_sha is not None:
+                assert v_sha == self._expected_vocab_sha1, (
+                    f"教师缓存词表与研究词表不一致: cache={v_sha} expected={self._expected_vocab_sha1} ({self._config.vocab_path})"
+                )
+            if v_size is not None:
+                assert int(v_size) == int(self._config.vocab_size), (
+                    f"教师缓存词表大小 {v_size} 与 config.vocab_size {self._config.vocab_size} 不一致"
+                )
+            if aug_sha is not None and self._expected_offline_aug_sha1:
+                assert aug_sha == self._expected_offline_aug_sha1, (
+                    "教师缓存用的 offline_aug_file 与训练端不一致；旋转角按 (token,view) 静默错配，必须重跑缓存"
+                )
+            self._teacher_meta_checked = True
+        return data
 
     def _load_aug_vocab_pdm_score(self, token: str):
         """Load per-token aug PDM scores; fall back to ori if pickle is corrupt/truncated."""
@@ -126,7 +283,24 @@ class GTRSAugAgent(AbstractAgent):
     def initialize(self) -> None:
         """Inherited, see superclass."""
         state_dict: Dict[str, Any] = torch.load(self._checkpoint_path, map_location=torch.device("cpu"))["state_dict"]
-        self.load_state_dict({k.replace("agent.", ""): v for k, v in state_dict.items()}, strict=False)
+        incompatible = self.load_state_dict(
+            {k.replace("agent.", ""): v for k, v in state_dict.items()}, strict=False)
+        missing = list(incompatible.missing_keys)
+        unexpected = list(incompatible.unexpected_keys)
+        # OPD 离线蒸馏 ckpt 里没有 teacher.*；学生键缺失（结构改变/没加载上）必须报错而不是随机初始化。
+        student_missing = [k for k in missing if k.startswith("model.student.")]
+        assert not student_missing, (
+            f"加载 ckpt 时学生侧缺失参数（结构已变 / 权重没加载上）：{student_missing[:8]}{' ...' if len(student_missing) > 8 else ''}"
+        )
+        teacher_missing = [k for k in missing if k.startswith("model.teacher.")]
+        if teacher_missing and self._config.inference.model == "teacher":
+            logger.warning(
+                "加载的 ckpt 缺少 %d 个 teacher.* 参数，但 inference.model='teacher'——"
+                "将用随机初始化的教师打分，分数不可信；请改用 inference.model=student 或加载完整 ckpt",
+                len(teacher_missing),
+            )
+        if student_missing or unexpected:
+            logger.info("initialize: unexpected_keys=%s", unexpected[:8])
 
     def get_sensor_config(self) -> SensorConfig:
         """Inherited, see superclass."""
@@ -259,6 +433,61 @@ class GTRSAugAgent(AbstractAgent):
 
         soft_loss = hydra_kd_imi_agent_loss_robust(revised_targets, student_pred, self._config, revised_scores)
         return soft_loss
+
+    def compute_loss_distill(
+            self,
+            features,
+            targets: Dict[str, torch.Tensor],
+            predictions: List[Dict[str, torch.Tensor]],
+            tokens=None
+    ):
+        """OPD 蒸馏总入口：on-policy（若有）与 ori 各算一份，按权重合并。"""
+        cfg_opd = self._config.opd
+
+        def build_cache(score_dir: str) -> Dict[str, torch.Tensor]:
+            items = [self._load_teacher_score(t, score_dir=score_dir) for t in tokens]
+            return _ops_teacher_to_tensors(
+                items, device=predictions[0]['imi'].device,
+                vocab_size=int(self._config.vocab_size),
+                topk=int(cfg_opd.topk_refine),
+            )
+
+        # 原视图蒸馏：教师缓存的 view_idx 必须是 0（原视图），配 predictions[0]
+        cache_ori = build_cache(cfg_opd.teacher_score_dir)
+        self._assert_view_match(cache_ori, 0, cfg_opd.teacher_score_dir)
+        loss_ori, details = opd_distill_loss(predictions[0], cache_ori, self._config)
+
+        total = loss_ori
+        if cfg_opd.on_policy_rounds > 0:
+            assert cfg_opd.teacher_onpolicy_score_dir, "on_policy_rounds>0 需要 opd.teacher_onpolicy_score_dir"
+            # on-policy 教师在「旋转了 -dθ 的观测」上打分，必须配学生**同一旋转**的视图。
+            # 原来这里用 predictions[0]（原视图）：师生看的是两张不同的图，蒸馏目标静默错配
+            # 且完全不会报错——这是最危险的一类 bug，所以改成显式索引 + 双向断言。
+            vi = int(cfg_opd.on_policy_view_idx)
+            assert 0 <= vi < len(predictions), (
+                f"opd.on_policy_view_idx={vi} 越界：本 batch 只有 {len(predictions)} 个学生视图"
+                f"（predictions[0]=原视图，1.. 为 ego_perturb 旋转视图）。"
+                f"请确认 ego_perturb.student_rotation_ensemble 已开启。")
+            cache_op = build_cache(cfg_opd.teacher_onpolicy_score_dir)
+            self._assert_view_match(cache_op, vi, cfg_opd.teacher_onpolicy_score_dir)
+            loss_op2, details_op = opd_distill_loss(predictions[vi], cache_op, self._config)
+            total = loss_ori + cfg_opd.on_policy_weight * loss_op2
+            for k, v in details_op.items():
+                details[f'onpolicy_{k}'] = v
+
+        return total, details
+
+    @staticmethod
+    def _assert_view_match(cache: Dict[str, torch.Tensor], expected_view: int, score_dir: str) -> None:
+        """教师缓存落盘的 view_idx 必须与它被配对的学生视图一致（-1 = 该样本缺失，跳过）。"""
+        vi = cache.get('view_idx')
+        if vi is None:
+            return
+        bad = vi[(vi >= 0) & (vi != expected_view)]
+        assert bad.numel() == 0, (
+            f"教师缓存 {score_dir} 的 view_idx={bad[0].item()}，但它被配到学生 predictions"
+            f"[{expected_view}]。师生看的不是同一张图，蒸馏目标会静默错配；"
+            f"请用 OPD_VIEW_IDX={expected_view} 重跑该缓存，或改 opd.on_policy_view_idx。")
 
     def compute_loss_multi_stage(
             self,

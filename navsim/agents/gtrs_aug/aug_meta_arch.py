@@ -30,21 +30,28 @@ class AugMetaArch(nn.Module):
         self.fp16_scaler = None
 
         student_model_dict = dict()
-        teacher_model_dict = dict()
 
-        student_model_dict["model"] = teacher_model
-        teacher_model_dict["model"] = student_model
-        embed_dim = teacher_model._backbone.img_feat_c
-        logger.info(f"OPTIONS -- architecture : embed_dim: {embed_dim}")
+        # OPD 离线蒸馏（teacher_mode='offline'）时 teacher_model=None：训练全程不建教师、
+        # 不跑教师、不做 EMA。仅 teacher_mode='ema' 时才保留在线软标签教师（消融对照）。
+        self._has_teacher = teacher_model is not None
+
+        student_model_dict["model"] = student_model
+        # embed_dim 必须取 student（异构时教师是 ViT-L 1024、学生 R34 512，取错会污染后续投影头）
+        embed_dim = student_model._backbone.img_feat_c
+        logger.info(f"OPTIONS -- architecture : embed_dim: {embed_dim} (has_teacher={self._has_teacher})")
 
         self.embed_dim = embed_dim
         self.student = nn.ModuleDict(student_model_dict)
-        self.teacher = nn.ModuleDict(teacher_model_dict)
-
-        # there is no backpropagation through the teacher, so no need for gradients
-        for p in self.teacher.parameters():
-            p.requires_grad = False
-        logger.info(f"Student and Teacher are built: they are both {type(self.student.model)} network.")
+        if self._has_teacher:
+            teacher_model_dict = dict()
+            teacher_model_dict["model"] = teacher_model
+            self.teacher = nn.ModuleDict(teacher_model_dict)
+            # there is no backpropagation through the teacher, so no need for gradients
+            for p in self.teacher.parameters():
+                p.requires_grad = False
+        else:
+            self.teacher = None
+            logger.info("OPD offline: no in-process teacher built (teacher distills via offline cache).")
 
     def backprop_loss(self, loss):
         if self.fp16_scaler is not None:
@@ -70,9 +77,14 @@ class AugMetaArch(nn.Module):
             return teacher_output_dict
 
         if self.cfg.training:
-            teacher_pred = get_teacher_output()
+            # 离线蒸馏：教师分离开进程缓存，训练时不跑教师，teacher_pred=None
+            teacher_pred = get_teacher_output() if self._has_teacher else None
         else:
-            if self.cfg.inference.model == "teacher":
+            use_teacher = self.cfg.inference.model == "teacher"
+            if use_teacher and not self._has_teacher:
+                logger.warning("inference.model='teacher' but no teacher built (OPD offline); falling back to student.")
+                use_teacher = False
+            if use_teacher:
                 teacher_pred = self.teacher.model(teacher_ori_features, **kwargs)
             else:
                 teacher_pred = self.student.model(teacher_ori_features, **kwargs)
@@ -80,6 +92,7 @@ class AugMetaArch(nn.Module):
             return teacher_pred, [], {}
 
         if self.cfg.lab.optimize_prev_frame_traj_for_ec:
+            assert self._has_teacher, "optimize_prev_frame_traj_for_ec requires an in-process teacher (EMA mode)"
             teacher_pred = {'cur': teacher_pred}
             teacher_prev_feat = {
                 'camera_feature': [teacher_ori_features['camera_feature'][-2], ],
@@ -98,6 +111,8 @@ class AugMetaArch(nn.Module):
         return teacher_pred, student_preds, loss_dict
 
     def update_teacher(self, m):
+        if not self._has_teacher:
+            return
         with torch.no_grad():
             for k in self.student.keys():
                 for stu_params, tea_params in zip(self.student[k].parameters(), self.teacher[k].parameters()):
@@ -108,9 +123,12 @@ class AugMetaArch(nn.Module):
                         tea_buf.data.copy_(stu_buf.data)
 
     def train(self, mode=True):
-        if mode:
-            super().train()
-            self.teacher.eval()
+        if self._has_teacher:
+            if mode:
+                super().train()
+                self.teacher.eval()
+            else:
+                self.teacher.eval()
+                self.student.eval()
         else:
-            self.teacher.eval()
-            self.student.eval()
+            super().train(mode)
