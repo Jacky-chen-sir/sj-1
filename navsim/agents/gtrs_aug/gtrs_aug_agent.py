@@ -283,9 +283,18 @@ class GTRSAugAgent(AbstractAgent):
     def initialize(self) -> None:
         """Inherited, see superclass."""
         state_dict: Dict[str, Any] = torch.load(self._checkpoint_path, map_location=torch.device("cpu"))["state_dict"]
-        incompatible = self.load_state_dict(
-            {k.replace("agent.", ""): v for k, v in state_dict.items()}, strict=False)
-        missing = list(incompatible.missing_keys)
+        state_dict = {k.replace("agent.", ""): v for k, v in state_dict.items()}
+        # 换词表尺寸评测（如 8192 训的 ckpt 配 16384.npy）时，shape 不符的键即使
+        # strict=False 也会 RuntimeError；先剔除，让 nn.Parameter 保留从 vocab_path 加载的值。
+        # 这些键是"有意跳过"，不进下面的 student_missing 断言。
+        own_state = self.state_dict()
+        mismatched = [k for k, v in state_dict.items() if k in own_state and own_state[k].shape != v.shape]
+        for k in mismatched:
+            logger.info("initialize: skip shape-mismatched key %s ckpt=%s model=%s",
+                        k, tuple(state_dict[k].shape), tuple(own_state[k].shape))
+            state_dict.pop(k)
+        incompatible = self.load_state_dict(state_dict, strict=False)
+        missing = [k for k in incompatible.missing_keys if k not in mismatched]
         unexpected = list(incompatible.unexpected_keys)
         # OPD 离线蒸馏 ckpt 里没有 teacher.*；学生键缺失（结构改变/没加载上）必须报错而不是随机初始化。
         student_missing = [k for k in missing if k.startswith("model.student.")]
