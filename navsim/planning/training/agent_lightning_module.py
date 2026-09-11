@@ -65,8 +65,27 @@ class AgentLightningModule(pl.LightningModule):
         :return: scalar loss
         """
         features, targets, tokens = batch
+        # DP: during validation Lightning sets the whole model to `eval()`.
+        # Unfortunately DPHead.forward() triggers expensive `dp_pred` proposal sampling
+        # when `not self.training`, even though the DP loss here only needs `env_kv`.
+        #
+        # That proposal sampling happens at every epoch-end validation and can explode
+        # memory, causing the job to hang/oom. We temporarily keep DPHead in `train()`
+        # mode only for the forward() call to suppress dp_pred generation.
+        if isinstance(self.agent, DPAgent):
+            dp_head = getattr(getattr(self.agent, "model", None), "_trajectory_head", None)
+        else:
+            dp_head = None
 
-        prediction = self.agent.forward(features)
+        if (not self.training) and dp_head is not None:
+            prev_training = dp_head.training
+            dp_head.train(True)  # suppress `if not self.training:` sampling in DPHead.forward()
+            try:
+                prediction = self.agent.forward(features)
+            finally:
+                dp_head.train(prev_training)
+        else:
+            prediction = self.agent.forward(features)
 
         if isinstance(self.agent, TransfuserAgent):
             loss, loss_dict = self.agent.compute_loss(features, targets, prediction)
@@ -74,9 +93,26 @@ class AgentLightningModule(pl.LightningModule):
             loss, loss_dict = self.agent.compute_loss(features, targets, prediction, tokens)
 
         for k, v in loss_dict.items():
-            self.log(f"{logging_prefix}/{k}", v, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
+            # Lightning forbids logging the same metric name twice with different kwargs.
+            # sync_dist=True triggers DDP allreduce; with cache_path=null a slow rank can
+            # hang others until NCCL watchdog timeout. Keep metrics local (no sync_dist).
+            self.log(
+                f"{logging_prefix}/{k}",
+                v,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=True,
+                sync_dist=False,
+            )
 
-        self.log(f"{logging_prefix}/loss", loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log(
+            f"{logging_prefix}/loss",
+            loss,
+            on_step=True,
+            on_epoch=True,
+            prog_bar=True,
+            sync_dist=False,
+        )
         return loss
 
     def training_step(self, batch: Tuple[Dict[str, Tensor], Dict[str, Tensor]], batch_idx: int) -> Tensor:

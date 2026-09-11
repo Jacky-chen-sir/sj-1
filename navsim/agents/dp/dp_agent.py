@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import os
 from typing import Any, Union
 from typing import Dict
@@ -34,6 +35,8 @@ from navsim.planning.training.abstract_feature_target_builder import (
     AbstractFeatureBuilder,
     AbstractTargetBuilder,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def dp_loss_bev(
@@ -77,11 +80,52 @@ class DPAgent(AbstractAgent):
         """Inherited, see superclass."""
         return self.__class__.__name__
 
+    def _apply_freeze_except_traj_head(self) -> None:
+        if not getattr(self._config, "freeze_except_traj_head", False):
+            return
+        n_train, n_freeze = 0, 0
+        for name, param in self.model.named_parameters():
+            if name.startswith("_trajectory_head"):
+                param.requires_grad = True
+                n_train += param.numel()
+            else:
+                param.requires_grad = False
+                n_freeze += param.numel()
+        logger.info(
+            f"freeze_except_traj_head: trainable={n_train:,} frozen={n_freeze:,} "
+            f"flow_matching={getattr(self._config, 'use_flow_matching', False)}"
+        )
+
+    def _reinit_trajectory_head(self) -> None:
+        """Randomly re-initialize DPHead transformer (FM trains a fresh decoder)."""
+        traj_head = self.model._trajectory_head
+        transformer = traj_head.transformer_dp
+        transformer.apply(transformer._init_weights)
+        n_params = sum(p.numel() for p in traj_head.parameters())
+        logger.info(f"Re-initialized _trajectory_head ({n_params:,} params) for Flow Matching")
+
     def initialize(self) -> None:
         """Inherited, see superclass."""
         state_dict: Dict[str, Any] = torch.load(self._checkpoint_path, map_location=torch.device("cpu"))[
             "state_dict"]
-        self.load_state_dict({k.replace("agent.", ""): v for k, v in state_dict.items()})
+        cleaned = {k.replace("agent.", ""): v for k, v in state_dict.items()}
+        reinit_traj_head = bool(getattr(self._config, "reinit_traj_head", False))
+        if reinit_traj_head:
+            cleaned = {k: v for k, v in cleaned.items() if "_trajectory_head" not in k}
+            load_result = self.load_state_dict(cleaned, strict=False)
+            logger.info(
+                f"Loaded DP checkpoint from {self._checkpoint_path} "
+                f"(skipped _trajectory_head; missing={len(load_result.missing_keys)}, "
+                f"unexpected={len(load_result.unexpected_keys)})"
+            )
+            self._reinit_trajectory_head()
+        else:
+            load_result = self.load_state_dict(cleaned, strict=True)
+            logger.info(
+                f"Loaded DP checkpoint from {self._checkpoint_path} "
+                f"(missing={len(load_result.missing_keys)}, unexpected={len(load_result.unexpected_keys)})"
+            )
+        self._apply_freeze_except_traj_head()
 
     def get_sensor_config(self) -> SensorConfig:
         """Inherited, see superclass."""
@@ -116,23 +160,29 @@ class DPAgent(AbstractAgent):
         return dp_loss_bev(targets, predictions, self._config, self.model._trajectory_head)
 
     def get_optimizers(self) -> Union[Optimizer, Dict[str, Union[Optimizer, LRScheduler]]]:
+        # Resume loads weights via Lightning ckpt without calling initialize(); freezing must
+        # happen here so optimizer param groups match the checkpoint (1 group when frozen).
+        self._apply_freeze_except_traj_head()
+
         backbone_params_name = '_backbone.image_encoder'
         reference_transformer_name = '_trajectory_head.reference_transformer'
         ori_transformer_name = '_trajectory_head.ori_transformer'
         img_backbone_params = list(
-            filter(lambda kv: backbone_params_name in kv[0], self.model.named_parameters()))
+            filter(lambda kv: backbone_params_name in kv[0] and kv[1].requires_grad, self.model.named_parameters()))
         default_params = list(filter(lambda kv:
+                                     kv[1].requires_grad and
                                      backbone_params_name not in kv[0] and
                                      reference_transformer_name not in kv[0] and
                                      ori_transformer_name not in kv[0], self.model.named_parameters()))
         params_lr_dict = [
             {'params': [tmp[1] for tmp in default_params]},
-            {
+        ]
+        if img_backbone_params:
+            params_lr_dict.append({
                 'params': [tmp[1] for tmp in img_backbone_params],
                 'lr': self._lr * self._config.lr_mult_backbone,
                 'weight_decay': self.backbone_wd
-            }
-        ]
+            })
 
         if self.scheduler == 'default':
             return torch.optim.Adam(params_lr_dict, lr=self._lr, weight_decay=self._config.weight_decay)

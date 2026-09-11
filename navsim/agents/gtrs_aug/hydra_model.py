@@ -62,7 +62,10 @@ class HydraModel(nn.Module):
 
         self.use_multi_stage = self._config.refinement.use_multi_stage
         if self.use_multi_stage:
-            if self._config.refinement.refinement_approach == 'offset_decoder':
+            # DriveSuprim paper uses refinement_approach="transformer_decoder" (absolute
+            # logits). That matches TrajOffsetHead with use_offset_refinement_v2=False.
+            approach = self._config.refinement.refinement_approach
+            if approach in ("offset_decoder", "transformer_decoder"):
                 self._trajectory_offset_head = TrajOffsetHead(
                     d_ffn=config.tf_d_ffn,
                     d_model=config.tf_d_model,
@@ -74,7 +77,10 @@ class HydraModel(nn.Module):
                     config=config
                 )
             else:
-                raise NotImplementedError
+                raise NotImplementedError(
+                    f"Unknown refinement_approach={approach}; "
+                    "use 'offset_decoder' or 'transformer_decoder'"
+                )
 
     def img_feat_blc(self, camera_feature):
         img_features = self._backbone(camera_feature)  # [b, c_img, h//32, w//32]

@@ -198,11 +198,21 @@ def cumsum_traj(norm_trajs):
 
 
 class DPHead(nn.Module):
+    """Trajectory decoder. Architecture is the official SimpleDiffusionTransformer.
+
+    Official weights predict DDPM epsilon. Setting use_flow_matching=True keeps the
+    same network and reinterprets the output as a Flow Matching velocity field.
+    """
+
     def __init__(self, num_poses: int, d_ffn: int, d_model: int, vocab_path: str,
                  nhead: int, nlayers: int, config: DPConfig = None
                  ):
         super().__init__()
         self.config = config
+        self.use_flow_matching = bool(getattr(config, 'use_flow_matching', False))
+        self.fm_num_inference_steps = int(getattr(config, 'fm_num_inference_steps', 20))
+        self.fm_sigma_min = float(getattr(config, 'fm_sigma_min', 1e-4))
+
         self.noise_scheduler = DDPMScheduler(
             num_train_timesteps=config.denoising_timesteps,
             beta_start=0.0001,
@@ -222,6 +232,19 @@ class DPHead(nn.Module):
         )
         self.num_inference_steps = self.noise_scheduler.config.num_train_timesteps
 
+    def _fm_time_for_transformer(self, t01: torch.Tensor) -> torch.Tensor:
+        """Map Flow-Matching t in [0, 1] onto the official DDPM timestep scale.
+
+        Official time embeddings were trained with integer t in [0, denoising_timesteps).
+        Passing raw t in [0, 1] would collapse that embedding.
+        """
+        return t01 * float(self.config.denoising_timesteps)
+
+    def _fm_interpolate(self, x1: torch.Tensor, noise: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        t = t.view(-1, 1, 1)
+        t = t * (1.0 - self.fm_sigma_min) + self.fm_sigma_min
+        return (1.0 - t) * x1 + t * noise
+
     def forward(self, kv) -> Dict[str, torch.Tensor]:
         B = kv.shape[0]
         result = {}
@@ -236,18 +259,23 @@ class DPHead(nn.Module):
                 device=condition.device,
             )
 
-            self.noise_scheduler.set_timesteps(self.num_inference_steps)
-
-            for t in self.noise_scheduler.timesteps:
-                model_output = self.transformer_dp(
-                    noise,
-                    t,
-                    condition
-                )
-                noise = self.noise_scheduler.step(
-                    model_output, t, noise
-                ).prev_sample
-            traj = cumsum_traj(noise)
+            if self.use_flow_matching:
+                num_steps = self.fm_num_inference_steps
+                dt = 1.0 / num_steps
+                x_t = noise
+                n = B * NUM_PROPOSALS
+                for i in range(num_steps):
+                    t_val = 1.0 - i * dt
+                    t01 = torch.full((n,), t_val, dtype=condition.dtype, device=condition.device)
+                    v_pred = self.transformer_dp(x_t, self._fm_time_for_transformer(t01), condition)
+                    x_t = x_t + v_pred * dt
+                traj = cumsum_traj(x_t)
+            else:
+                self.noise_scheduler.set_timesteps(self.num_inference_steps)
+                for t in self.noise_scheduler.timesteps:
+                    model_output = self.transformer_dp(noise, t, condition)
+                    noise = self.noise_scheduler.step(model_output, t, noise).prev_sample
+                traj = cumsum_traj(noise)
             result['dp_pred'] = traj.view(B, NUM_PROPOSALS, HORIZON, ACTION_DIM_ORI)
 
         return result
@@ -256,26 +284,23 @@ class DPHead(nn.Module):
         B = kv.shape[0]
         device = kv.device
         gt_trajectory = gt_trajectory.float()
-        gt_trajectory = diff_traj(gt_trajectory)
+        x1 = diff_traj(gt_trajectory)
 
-        noise = torch.randn(gt_trajectory.shape, device=device, dtype=torch.float)
-        # Sample a random timestep for each image
+        noise = torch.randn(x1.shape, device=device, dtype=torch.float)
+
+        if self.use_flow_matching:
+            t01 = torch.rand(B, device=device, dtype=torch.float)
+            x_t = self._fm_interpolate(x1, noise, t01)
+            v_target = x1 - noise
+            v_pred = self.transformer_dp(x_t, self._fm_time_for_transformer(t01), kv)
+            return F.mse_loss(v_pred, v_target)
+
         timesteps = torch.randint(
             0, self.noise_scheduler.config.num_train_timesteps,
             (B,), device=device
         ).long()
-        # Add noise to the clean images according to the noise magnitude at each timestep
-        # (this is the forward diffusion process)
-        noisy_dp_input = self.noise_scheduler.add_noise(
-            gt_trajectory, noise, timesteps
-        )
-
-        # Predict the noise residual
-        pred = self.transformer_dp(
-            noisy_dp_input,
-            timesteps,
-            kv
-        )
+        noisy_dp_input = self.noise_scheduler.add_noise(x1, noise, timesteps)
+        pred = self.transformer_dp(noisy_dp_input, timesteps, kv)
         return F.mse_loss(pred, noise)
 
 

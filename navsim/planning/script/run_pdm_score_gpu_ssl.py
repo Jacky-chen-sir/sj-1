@@ -1,18 +1,3 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 import logging
 import os
 import pickle
@@ -42,23 +27,18 @@ from navsim.common.dataloader import MetricCacheLoader, SceneFilter, SceneLoader
 from navsim.common.enums import SceneFrameType
 from navsim.evaluate.pdm_score import pdm_score
 from navsim.planning.script.builders.worker_pool_builder import build_worker
-from navsim.planning.script.run_pdm_score import compute_final_scores, calculate_individual_mapping_scores, \
-    create_scene_aggregators
-from navsim.planning.script.run_pdm_score_gpu_v2 import (
-    _finalize_minimal_scores,
-    _finalize_one_stage_scores,
-    _finalize_two_stage_scores,
-)
+from navsim.planning.script.run_pdm_score import compute_final_scores, calculate_weighted_average_score, \
+                                                 calculate_individual_mapping_scores, create_scene_aggregators
 from navsim.planning.simulation.planner.pdm_planner.scoring.pdm_scorer import PDMScorer
 from navsim.planning.simulation.planner.pdm_planner.simulation.pdm_simulator import PDMSimulator
-from navsim.planning.training.agent_lightning_module_aug import AgentLightningModuleAug
-from navsim.planning.training.dataset_aug import DatasetAug as Dataset
+from navsim.planning.training.agent_lightning_module_ssl import AgentLightningModuleSSL
+from navsim.planning.training.dataset_ssl import DatasetSSL as Dataset
 from navsim.traffic_agents_policies.abstract_traffic_agents_policy import AbstractTrafficAgentsPolicy
 
 logger = logging.getLogger(__name__)
 
 CONFIG_PATH = "config/pdm_scoring"
-CONFIG_NAME = "default_run_pdm_score_gpu"
+CONFIG_NAME = "default_run_pdm_score_gpu_ssl"
 
 
 def run_pdm_score_wo_inference(args: List[Dict[str, Union[List[str], DictConfig]]]) -> List[pd.DataFrame]:
@@ -73,14 +53,12 @@ def run_pdm_score_wo_inference(args: List[Dict[str, Union[List[str], DictConfig]
     log_names = [a["log_file"] for a in args]
     tokens = [t for a in args for t in a["tokens"]]
     cfg: DictConfig = args[0]["cfg"]
-    model_trajectory = {}
-    for a in args:
-        model_trajectory.update(a["model_trajectory"])
+    model_trajectory = args[0]['model_trajectory']
 
     simulator: PDMSimulator = instantiate(cfg.simulator)
     scorer: PDMScorer = instantiate(cfg.scorer)
     assert (
-            simulator.proposal_sampling == scorer.proposal_sampling
+        simulator.proposal_sampling == scorer.proposal_sampling
     ), "Simulator and scorer proposal sampling has to be identical"
 
     metric_cache_loader = MetricCacheLoader(Path(cfg.metric_cache_path))
@@ -103,10 +81,9 @@ def run_pdm_score_wo_inference(args: List[Dict[str, Union[List[str], DictConfig]
         cfg.traffic_agents_policy.reactive, simulator.proposal_sampling
     )
 
-    scene_loader_tokens_stage_one = scene_loader.tokens_stage_one or []
-    metric_cache_tokens = metric_cache_loader.tokens or []
+    scene_loader_tokens_stage_one = scene_loader.tokens_stage_one
 
-    tokens_to_evaluate_stage_one = list(set(scene_loader_tokens_stage_one) & set(metric_cache_tokens))
+    tokens_to_evaluate_stage_one = list(set(scene_loader_tokens_stage_one) & set(metric_cache_loader.tokens))
 
     for idx, (token) in enumerate(tokens_to_evaluate_stage_one):
         logger.info(
@@ -154,11 +131,9 @@ def run_pdm_score_wo_inference(args: List[Dict[str, Union[List[str], DictConfig]
     traffic_agents_policy_stage_two: AbstractTrafficAgentsPolicy = instantiate(
         cfg.traffic_agents_policy.reactive, simulator.proposal_sampling
     )
-    scene_loader_tokens_stage_two = scene_loader.reactive_tokens_stage_two or []
-    if scene_loader.reactive_tokens_stage_two is None:
-        logger.warning("scene_loader.reactive_tokens_stage_two is None, skipping stage two for this worker.")
+    scene_loader_tokens_stage_two = scene_loader.reactive_tokens_stage_two
 
-    tokens_to_evaluate_stage_two = list(set(scene_loader_tokens_stage_two) & set(metric_cache_tokens))
+    tokens_to_evaluate_stage_two = list(set(scene_loader_tokens_stage_two) & set(metric_cache_loader.tokens))
     for idx, (token) in enumerate(tokens_to_evaluate_stage_two):
         logger.info(
             f"Processing stage two reactive scenario {idx + 1} / {len(tokens_to_evaluate_stage_two)} in thread_id={thread_id}, node_id={node_id}"
@@ -211,12 +186,37 @@ def main(cfg: DictConfig) -> None:
     """
 
     build_logger(cfg)
-    pkl_path = os.getenv('SUBSCORE_PATH')
-    skip_infer = os.getenv('SKIP_INFER', '').lower() in ('1', 'true', 'yes')
-    if skip_infer and not (pkl_path and os.path.isfile(pkl_path)):
-        raise FileNotFoundError(f"SKIP_INFER=1 but pickle not found: {pkl_path}")
+
+    if cfg.debug:
+        import pdb; pdb.set_trace()
+        import os; os.environ['ROBUST_HYDRA_DEBUG'] = 'true'
+
+    # gpu inference
+    agent: AbstractAgent = instantiate(cfg.agent)
+    agent.initialize()
 
     scene_filter = instantiate(cfg.train_test_split.scene_filter)
+    scene_loader_inference = SceneLoader(
+        synthetic_sensor_path=Path(cfg.synthetic_sensor_path),
+        original_sensor_path=Path(cfg.original_sensor_path),
+        data_path=Path(cfg.navsim_log_path),
+        synthetic_scenes_path=Path(cfg.synthetic_scenes_path),
+        scene_filter=scene_filter,
+        sensor_config=agent.get_sensor_config(),
+    )
+    dataset = Dataset(
+        scene_loader=scene_loader_inference,
+        feature_builders=agent.get_feature_builders(),
+        target_builders=agent.get_target_builders(),
+        cfg=cfg.agent.config,
+        cache_path=None,
+        force_cache_computation=False,
+        append_token_to_batch=True
+    )
+    dataloader = DataLoader(dataset, **cfg.dataloader.params, shuffle=False)
+
+    # Extract scenes based on scene-loader to know which tokens to distribute across workers
+    # TODO: infer the tokens per log from metadata, to not have to load metric cache and scenes here
     scene_loader = SceneLoader(
         synthetic_sensor_path=None,
         original_sensor_path=None,
@@ -236,81 +236,46 @@ def main(cfg: DictConfig) -> None:
         logger.warning(f"Unused metric cache for {num_unused_metric_cache_tokens} tokens. Skipping these tokens.")
     logger.info(f"Starting pdm scoring of {len(tokens_to_evaluate)} scenarios...")
 
-    if skip_infer:
-        logger.info(f"SKIP_INFER=1, loading proposals from {pkl_path}")
-        merged_predictions = pickle.load(open(pkl_path, 'rb'))
-    else:
-        agent: AbstractAgent = instantiate(cfg.agent)
-        agent.initialize()
+    # assert len(dataset) == len(tokens_to_evaluate), f'dataloader: {len(dataset)}, tokens: {len(tokens_to_evaluate)}'
 
-        scene_loader_inference = SceneLoader(
-            synthetic_sensor_path=Path(cfg.synthetic_sensor_path),
-            original_sensor_path=Path(cfg.original_sensor_path),
-            data_path=Path(cfg.navsim_log_path),
-            synthetic_scenes_path=Path(cfg.synthetic_scenes_path),
-            scene_filter=scene_filter,
-            sensor_config=agent.get_sensor_config(),
-        )
-        dataset = Dataset(
-            scene_loader=scene_loader_inference,
-            feature_builders=agent.get_feature_builders(),
-            target_builders=agent.get_target_builders(),
+    trainer = pl.Trainer(**cfg.trainer.params, callbacks=agent.get_training_callbacks())
+    predictions = trainer.predict(
+        AgentLightningModuleSSL(
             cfg=cfg.agent.config,
-            cache_path=None,
-            force_cache_computation=False,
-            append_token_to_batch=True
-        )
-        dataloader = DataLoader(dataset, **cfg.dataloader.params, shuffle=False)
-        if len(dataset) != len(tokens_to_evaluate):
-            logger.warning(
-                f"Dataloader has {len(dataset)} samples vs {len(tokens_to_evaluate)} metric-cache tokens; "
-                "scoring will use the intersection only."
-            )
+            agent=agent,
+        ),
+        dataloader,
+        return_predictions=True
+    )
 
-        trainer = pl.Trainer(**cfg.trainer.params, callbacks=agent.get_training_callbacks())
-        predictions = trainer.predict(
-            AgentLightningModuleAug(
-                cfg=cfg.agent.config,
-                agent=agent,
-            ),
-            dataloader,
-            return_predictions=True
-        )
+    dist.barrier()
+    all_predictions = [None for _ in range(dist.get_world_size())]
 
-        # Single-GPU predict does not init a process group; only barrier/gather when DDP is active.
-        if dist.is_available() and dist.is_initialized():
-            dist.barrier()
-            all_predictions = [None for _ in range(dist.get_world_size())]
-            dist.all_gather_object(all_predictions, predictions)
-            if dist.get_rank() != 0:
-                return None
-        else:
-            all_predictions = [predictions]
+    if dist.is_initialized():
+        dist.all_gather_object(all_predictions, predictions)
+    else:
+        all_predictions.append(predictions)
 
-        merged_predictions = {}
-        for proc_prediction in all_predictions:
-            for d in proc_prediction:
-                merged_predictions.update(d)
+    if dist.get_rank() != 0:
+        return None
 
-        pickle.dump(merged_predictions, open(pkl_path, 'wb'))
-        logger.info(f"Wrote proposals/subscores to {pkl_path}")
+    merged_predictions = {}
+    for proc_prediction in all_predictions:
+        for d in proc_prediction:
+            merged_predictions.update(d)
 
-    scoring_predictions = {
-        token: {"trajectory": prediction["trajectory"]}
-        for token, prediction in merged_predictions.items()
-    }
-    del merged_predictions
+    agent_ckpt_path = Path(cfg.agent.checkpoint_path).parent.absolute().__str__()
+    import os
+    pkl_path = os.getenv('SUBSCORE_PATH', None)
+    pkl_name = Path(cfg.agent.checkpoint_path).name.split('.')[0] if pkl_path is None else pkl_path
+    # pickle.dump(merged_predictions, open(f'{agent_ckpt_path}/{pkl_name}.pkl', 'wb'))
 
     data_points = [
         {
             "cfg": cfg,
             "log_file": log_file,
             "tokens": tokens_list,
-            "model_trajectory": {
-                token: scoring_predictions[token]
-                for token in tokens_list
-                if token in scoring_predictions
-            },
+            "model_trajectory": merged_predictions
         }
         for log_file, tokens_list in scene_loader.get_tokens_list_per_log().items()
     ]
@@ -318,61 +283,112 @@ def main(cfg: DictConfig) -> None:
     worker = build_worker(cfg)
     score_rows: List[pd.DataFrame] = worker_map(worker, run_pdm_score_wo_inference, data_points)
 
-    raw_pdm_score_df = pd.concat(score_rows, ignore_index=True)
-    save_path = Path(cfg.output_dir)
-    save_path.mkdir(parents=True, exist_ok=True)
-    raw_score_path = save_path / "raw_pdm_score.pkl"
-    try:
-        with open(raw_score_path, "wb") as f:
-            pickle.dump(raw_pdm_score_df, f)
-        logger.info(f"Raw PDM score rows are stored in: {raw_score_path}.")
-    except Exception:
-        logger.exception("Failed to save raw PDM score rows; continuing to final aggregation.")
+    pdm_score_df = pd.concat(score_rows)
 
-    num_sucessful_scenarios = int(raw_pdm_score_df["valid"].fillna(False).sum())
-    num_failed_scenarios = len(raw_pdm_score_df) - num_sucessful_scenarios
+    try:
+        raw_mapping = cfg.train_test_split.reactive_all_mapping
+        all_mappings: Dict[Tuple[str, str], List[Tuple[str, str]]] = {}
+
+        for orig_token, prev_token, two_stage_pairs in raw_mapping:
+            if prev_token in set(scene_loader.tokens) or orig_token in set(scene_loader.tokens):
+                all_mappings[(orig_token, prev_token)] = [tuple(pair) for pair in two_stage_pairs]
+
+        pdm_score_df = create_scene_aggregators(
+            all_mappings, pdm_score_df, instantiate(cfg.simulator.proposal_sampling)
+        )
+        pdm_score_df = compute_final_scores(pdm_score_df)
+        pseudo_closed_loop_valid = True
+
+    except Exception:
+        logger.warning("----------- Failed to calculate pseudo closed-loop weights or comfort:")
+        traceback.print_exc()
+        pdm_score_df["weight"] = 1.0
+        pseudo_closed_loop_valid = False
+
+    num_sucessful_scenarios = pdm_score_df["valid"].sum()
+    num_failed_scenarios = len(pdm_score_df) - num_sucessful_scenarios
     if num_failed_scenarios > 0:
-        failed_tokens = raw_pdm_score_df[~raw_pdm_score_df["valid"].fillna(False)]["token"].to_list()
+        failed_tokens = pdm_score_df[~pdm_score_df["valid"]]["token"].to_list()
     else:
         failed_tokens = []
 
-    if cfg.train_test_split.get("reactive_all_mapping"):
-        try:
-            pdm_score_df = _finalize_two_stage_scores(raw_pdm_score_df.copy(), cfg, scene_loader)
-        except Exception:
-            logger.exception("Two-stage final aggregation failed; writing one-stage fallback CSV instead.")
-            try:
-                pdm_score_df = _finalize_one_stage_scores(raw_pdm_score_df.copy(), cfg)
-            except Exception:
-                logger.exception("One-stage fallback aggregation failed; writing minimal raw fallback CSV instead.")
-                pdm_score_df = _finalize_minimal_scores(raw_pdm_score_df.copy())
-    else:
-        logger.warning("No train_test_split.reactive_all_mapping configured; writing one-stage fallback CSV.")
-        try:
-            pdm_score_df = _finalize_one_stage_scores(raw_pdm_score_df.copy(), cfg)
-        except Exception:
-            logger.exception("One-stage fallback aggregation failed; writing minimal raw fallback CSV instead.")
-            pdm_score_df = _finalize_minimal_scores(raw_pdm_score_df.copy())
+    score_cols = [
+        c
+        for c in pdm_score_df.columns
+        if (
+            (any(score.name in c for score in fields(PDMResults)) or c == "two_frame_extended_comfort" or c == "score")
+            and c != "pdm_score"
+        )
+    ]
 
-    timestamp = datetime.now().strftime("%Y.%m.%d.%H.%M.%S")
-    csv_path = save_path / f"{timestamp}.csv"
-    pdm_score_df.to_csv(csv_path)
-
-    final_score_rows = pdm_score_df[pdm_score_df["token"] == "extended_pdm_score_combined"]
-    final_score = final_score_rows["score"].iloc[0] if not final_score_rows.empty else np.nan
-    aggregation_mode = (
-        pdm_score_df["aggregation_mode"].iloc[0] if "aggregation_mode" in pdm_score_df.columns else "unknown"
+    pcl_group_score, pcl_stage1_score, pcl_stage2_score = calculate_individual_mapping_scores(
+        pdm_score_df[score_cols + ["token", "weight"]], all_mappings
     )
+
+    for col in score_cols:
+        stage_one_mask = pdm_score_df["frame_type"] == SceneFrameType.ORIGINAL
+        stage_two_mask = pdm_score_df["frame_type"] == SceneFrameType.SYNTHETIC
+
+        pdm_score_df.loc[stage_one_mask, f"{col}_stage_one"] = pdm_score_df.loc[stage_one_mask, col]
+        pdm_score_df.loc[stage_two_mask, f"{col}_stage_two"] = pdm_score_df.loc[stage_two_mask, col]
+
+    pdm_score_df.drop(columns=score_cols, inplace=True)
+    pdm_score_df["score"] = pdm_score_df["score_stage_one"].combine_first(pdm_score_df["score_stage_two"])
+    pdm_score_df.drop(columns=["score_stage_one", "score_stage_two"], inplace=True)
+
+    stage1_cols = [f"{col}_stage_one" for col in score_cols if col != "score"]
+    stage2_cols = [f"{col}_stage_two" for col in score_cols if col != "score"]
+    score_cols = stage1_cols + stage2_cols + ["score"]
+
+    pdm_score_df = pdm_score_df[["token", "valid"] + score_cols]
+
+    summary_rows = []
+
+    stage1_row = pd.Series(index=pdm_score_df.columns, dtype=object)
+    stage1_row["token"] = "extended_pdm_score_stage_one"
+    stage1_row["valid"] = pseudo_closed_loop_valid
+    stage1_row["score"] = pcl_stage1_score.get("score", np.nan)
+    for col in pcl_stage1_score.index:
+        if col not in ["token", "valid", "score"]:
+            stage1_row[f"{col}_stage_one"] = pcl_stage1_score[col]
+    summary_rows.append(stage1_row)
+
+    stage2_row = pd.Series(index=pdm_score_df.columns, dtype=object)
+    stage2_row["token"] = "extended_pdm_score_stage_two"
+    stage2_row["valid"] = pseudo_closed_loop_valid
+    stage2_row["score"] = pcl_stage2_score.get("score", np.nan)
+    for col in pcl_stage2_score.index:
+        if col not in ["token", "valid", "score"]:
+            stage2_row[f"{col}_stage_two"] = pcl_stage2_score[col]
+    summary_rows.append(stage2_row)
+
+    combined_row = pd.Series(index=pdm_score_df.columns, dtype=object)
+    combined_row["token"] = "extended_pdm_score_combined"
+    combined_row["valid"] = pseudo_closed_loop_valid
+    combined_row["score"] = pcl_group_score["score"]
+
+    for col in pcl_stage1_score.index:
+        if col not in ["token", "valid", "score"]:
+            combined_row[f"{col}_stage_one"] = pcl_stage1_score[col]
+
+    for col in pcl_stage2_score.index:
+        if col not in ["token", "valid", "score"]:
+            combined_row[f"{col}_stage_two"] = pcl_stage2_score[col]
+    summary_rows.append(combined_row)
+
+    pdm_score_df = pd.concat([pdm_score_df, pd.DataFrame(summary_rows)], ignore_index=True)
+
+    save_path = Path(cfg.output_dir)
+    timestamp = datetime.now().strftime("%Y.%m.%d.%H.%M.%S")
+    pdm_score_df.to_csv(save_path / f"{timestamp}.csv")
 
     logger.info(
         f"""
         Finished running evaluation.
             Number of successful scenarios: {num_sucessful_scenarios}.
             Number of failed scenarios: {num_failed_scenarios}.
-            Aggregation mode: {aggregation_mode}.
-            Final extended pdm score of valid results: {final_score}.
-            Raw score rows are stored in: {raw_score_path}.
-            Results are stored in: {csv_path}.
+            Final extended pdm score of valid results: {pdm_score_df[pdm_score_df["token"] == "extended_pdm_score_combined"]["score"].iloc[0]}.
+            Results are stored in: {save_path / f"{timestamp}.csv"}.
         """
     )
 

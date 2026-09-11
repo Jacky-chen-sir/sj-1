@@ -26,10 +26,32 @@ from navsim.agents.transfuser.transfuser_config import TransfuserConfig
 NAVSIM_DEVKIT_ROOT = os.environ.get("NAVSIM_DEVKIT_ROOT")
 
 
+def sync_drivesuprim_config_aliases(config: "HydraConfigAug") -> "HydraConfigAug":
+    """Map DriveSuprim flat fields onto nested gtrs_aug config (safe to call multiple times)."""
+    if config.ego_perturb.n_student_rotation_ensemble is not None and config.ego_perturb.n_student_rotation_ensemble >= 0:
+        config.student_rotation_ensemble = int(config.ego_perturb.n_student_rotation_ensemble)
+    if config.ego_perturb.offline_aug_angle_boundary is not None and config.ego_perturb.offline_aug_angle_boundary >= 0:
+        config.ego_perturb.rotation.offline_aug_angle_boundary = float(
+            config.ego_perturb.offline_aug_angle_boundary
+        )
+        config.ego_perturb.rotation.enable = True
+
+    config.lab.use_imi_learning_in_refinement = bool(config.refinement.use_imi_learning_in_refinement)
+    config.lab.use_first_stage_traj_in_infer = bool(config.inference.use_first_stage_traj_in_infer)
+    config.lab.save_pickle = bool(config.inference.save_pickle)
+
+    if config.refinement.refinement_approach == "transformer_decoder":
+        config.refinement.use_offset_refinement_v2 = False
+    return config
+
+
 @dataclass
 class InferConfig:
     model: str = "teacher"  # teacher or student
     use_aug: bool = True  # whether using teacher augmentation
+    # DriveSuprim flat aliases (synced onto LabConfig in HydraConfigAug.__post_init__)
+    use_first_stage_traj_in_infer: bool = False
+    save_pickle: bool = False
 
 
 @dataclass
@@ -55,6 +77,9 @@ class EgoPerturbConfig:
     offline_aug_file: str = '???'
     rotation: RotationConfig = RotationConfig()
     va: VAConfig = VAConfig()
+    # DriveSuprim flat aliases (synced in HydraConfigAug.__post_init__)
+    n_student_rotation_ensemble: int = -1  # >=0 overrides HydraConfigAug.student_rotation_ensemble
+    offline_aug_angle_boundary: float = -1.0  # >=0 overrides rotation.offline_aug_angle_boundary
 
 
 @dataclass
@@ -107,6 +132,8 @@ class IbotConfig:
 @dataclass
 class RefinementConfig:
     use_multi_stage: bool = False
+    # "transformer_decoder" is DriveSuprim alias for absolute TrajOffsetHead
+    # (use_offset_refinement_v2=False). "offset_decoder" is the GTRS name.
     refinement_approach: str = "offset_decoder"
     num_refinement_stage: int = 1  # 2
     stage_layers: str = "3"  # "3+3"
@@ -119,6 +146,8 @@ class RefinementConfig:
 
     traj_expansion_in_infer: bool = False
     n_total_traj: int = 1024
+    # DriveSuprim alias → synced to lab.use_imi_learning_in_refinement
+    use_imi_learning_in_refinement: bool = True
 
 
 @dataclass
@@ -326,6 +355,9 @@ class HydraConfigAug(TransfuserConfig):
     inference: InferConfig = InferConfig()
 
     lab: LabConfig = LabConfig()
+
+    def __post_init__(self):
+        sync_drivesuprim_config_aliases(self)
 
     @property
     def bev_semantic_frame(self) -> Tuple[int, int]:

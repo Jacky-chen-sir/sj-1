@@ -44,6 +44,11 @@ from navsim.evaluate.pdm_score import pdm_score
 from navsim.planning.script.builders.worker_pool_builder import build_worker
 from navsim.planning.script.run_pdm_score import create_scene_aggregators, calculate_individual_mapping_scores, \
     compute_final_scores
+from navsim.planning.script.run_pdm_score_one_stage import (
+    create_scene_aggregators as create_one_stage_scene_aggregators,
+    compute_final_scores as compute_one_stage_final_scores,
+    infer_start_adjacent_mapping,
+)
 from navsim.planning.simulation.planner.pdm_planner.scoring.pdm_scorer import PDMScorer
 from navsim.planning.simulation.planner.pdm_planner.simulation.pdm_simulator import PDMSimulator
 from navsim.planning.training.agent_lightning_module import AgentLightningModule
@@ -68,7 +73,9 @@ def run_pdm_score(args: List[Dict[str, Union[List[str], DictConfig]]]) -> List[p
     log_names = [a["log_file"] for a in args]
     tokens = [t for a in args for t in a["tokens"]]
     cfg: DictConfig = args[0]["cfg"]
-    model_trajectory = args[0]['model_trajectory']
+    model_trajectory = {}
+    for a in args:
+        model_trajectory.update(a["model_trajectory"])
 
     simulator: PDMSimulator = instantiate(cfg.simulator)
     scorer: PDMScorer = instantiate(cfg.scorer)
@@ -96,9 +103,10 @@ def run_pdm_score(args: List[Dict[str, Union[List[str], DictConfig]]]) -> List[p
         cfg.traffic_agents_policy.reactive, simulator.proposal_sampling
     )
 
-    scene_loader_tokens_stage_one = scene_loader.tokens_stage_one
+    scene_loader_tokens_stage_one = scene_loader.tokens_stage_one or []
+    metric_cache_tokens = metric_cache_loader.tokens or []
 
-    tokens_to_evaluate_stage_one = list(set(scene_loader_tokens_stage_one) & set(metric_cache_loader.tokens))
+    tokens_to_evaluate_stage_one = list(set(scene_loader_tokens_stage_one) & set(metric_cache_tokens))
     for idx, (token) in enumerate(tokens_to_evaluate_stage_one):
         logger.info(
             f"Processing stage one reactive scenario {idx + 1} / {len(tokens_to_evaluate_stage_one)} in thread_id={thread_id}, node_id={node_id}"
@@ -144,9 +152,11 @@ def run_pdm_score(args: List[Dict[str, Union[List[str], DictConfig]]]) -> List[p
     traffic_agents_policy_stage_two: AbstractTrafficAgentsPolicy = instantiate(
         cfg.traffic_agents_policy.reactive, simulator.proposal_sampling
     )
-    scene_loader_tokens_stage_two = scene_loader.reactive_tokens_stage_two
+    scene_loader_tokens_stage_two = scene_loader.reactive_tokens_stage_two or []
+    if scene_loader.reactive_tokens_stage_two is None:
+        logger.warning("scene_loader.reactive_tokens_stage_two is None, skipping stage two for this worker.")
 
-    tokens_to_evaluate_stage_two = list(set(scene_loader_tokens_stage_two) & set(metric_cache_loader.tokens))
+    tokens_to_evaluate_stage_two = list(set(scene_loader_tokens_stage_two) & set(metric_cache_tokens))
     for idx, (token) in enumerate(tokens_to_evaluate_stage_two):
         logger.info(
             f"Processing stage two reactive scenario {idx + 1} / {len(tokens_to_evaluate_stage_two)} in thread_id={thread_id}, node_id={node_id}"
@@ -191,144 +201,56 @@ def run_pdm_score(args: List[Dict[str, Union[List[str], DictConfig]]]) -> List[p
     return pdm_results
 
 
-@hydra.main(config_path=CONFIG_PATH, config_name=CONFIG_NAME, version_base=None)
-def main(cfg: DictConfig) -> None:
-    """
-    Main entrypoint for running PDMS evaluation.
-    :param cfg: omegaconf dictionary
-    """
-
-    build_logger(cfg)
-    combined = cfg.get('combined_inference', False)
-
-    print(f'Combined inference: {combined}')
-    dump_path = os.getenv('SUBSCORE_PATH')
-    print(f'Subscore/Trajectories saved to {dump_path}')
-    # gpu inference
-    agent: AbstractAgent = instantiate(cfg.agent)
-    agent.initialize()
-
-    # Extract scenes based on scene-loader to know which tokens to distribute across workers
-    scene_filter = instantiate(cfg.train_test_split.scene_filter)
-
-    scene_loader_inference = SceneLoader(
-        synthetic_sensor_path=Path(cfg.synthetic_sensor_path),
-        original_sensor_path=Path(cfg.original_sensor_path),
-        data_path=Path(cfg.navsim_log_path),
-        synthetic_scenes_path=Path(cfg.synthetic_scenes_path),
-        scene_filter=scene_filter,
-        sensor_config=agent.get_sensor_config(),
-    )
-    dataset = Dataset(
-        scene_loader=scene_loader_inference,
-        feature_builders=agent.get_feature_builders(),
-        target_builders=agent.get_target_builders(),
-        cache_path=None,
-        force_cache_computation=False,
-        append_token_to_batch=True,
-        is_training=False
-    )
-    dataloader = DataLoader(dataset, **cfg.dataloader.params, shuffle=False)
-    scene_loader = SceneLoader(
-        synthetic_sensor_path=None,
-        original_sensor_path=None,
-        data_path=Path(cfg.navsim_log_path),
-        synthetic_scenes_path=Path(cfg.synthetic_scenes_path),
-        scene_filter=scene_filter,
-        sensor_config=SensorConfig.build_no_sensors(),
-    )
-
-    metric_cache_loader = MetricCacheLoader(Path(cfg.metric_cache_path))
-
-    tokens_to_evaluate = list(set(scene_loader.tokens) & set(metric_cache_loader.tokens))
-    num_missing_metric_cache_tokens = len(set(scene_loader.tokens) - set(metric_cache_loader.tokens))
-    num_unused_metric_cache_tokens = len(set(metric_cache_loader.tokens) - set(scene_loader.tokens))
-    if num_missing_metric_cache_tokens > 0:
-        logger.warning(f"Missing metric cache for {num_missing_metric_cache_tokens} tokens. Skipping these tokens.")
-    if num_unused_metric_cache_tokens > 0:
-        logger.warning(f"Unused metric cache for {num_unused_metric_cache_tokens} tokens. Skipping these tokens.")
-    logger.info(f"Starting pdm scoring of {len(tokens_to_evaluate)} scenarios...")
-
-    trainer = pl.Trainer(**cfg.trainer.params, callbacks=agent.get_training_callbacks())
-    predictions = trainer.predict(
-        AgentLightningModule(
-            agent=agent,
-            combined=combined
-        ),
-        dataloader,
-        return_predictions=True
-    )
-
-    dist.barrier()
-    all_predictions = [None for _ in range(dist.get_world_size())]
-
-    if dist.is_initialized():
-        dist.all_gather_object(all_predictions, predictions)
-    else:
-        all_predictions.append(predictions)
-
-    if dist.get_rank() != 0:
-        return None
-
-    merged_predictions = {}
-    for proc_prediction in all_predictions:
-        for d in proc_prediction:
-            merged_predictions.update(d)
-
-    pickle.dump(merged_predictions, open(dump_path, 'wb'))
-
-    data_points = [
-        {
-            "cfg": cfg,
-            "log_file": log_file,
-            "tokens": tokens_list,
-            "model_trajectory": merged_predictions
-        }
-        for log_file, tokens_list in scene_loader.get_tokens_list_per_log().items()
-    ]
-
-    worker = build_worker(cfg)
-    score_rows: List[pd.DataFrame] = worker_map(worker, run_pdm_score, data_points)
-
-    pdm_score_df = pd.concat(score_rows)
-
-    try:
-        raw_mapping = cfg.train_test_split.reactive_all_mapping
-        all_mappings: Dict[Tuple[str, str], List[Tuple[str, str]]] = {}
-
-        for orig_token, prev_token, two_stage_pairs in raw_mapping:
-            if prev_token in set(scene_loader.tokens) or orig_token in set(scene_loader.tokens):
-                all_mappings[(orig_token, prev_token)] = [tuple(pair) for pair in two_stage_pairs]
-
-        pdm_score_df = create_scene_aggregators(
-            all_mappings, pdm_score_df, instantiate(cfg.simulator.proposal_sampling)
-        )
-        pdm_score_df = compute_final_scores(pdm_score_df)
-        pseudo_closed_loop_valid = True
-
-    except Exception:
-        logger.warning("----------- Failed to calculate pseudo closed-loop weights or comfort:")
-        traceback.print_exc()
-        pdm_score_df["weight"] = 1.0
-        pseudo_closed_loop_valid = False
-
-    num_sucessful_scenarios = pdm_score_df["valid"].sum()
-    num_failed_scenarios = len(pdm_score_df) - num_sucessful_scenarios
-    if num_failed_scenarios > 0:
-        failed_tokens = pdm_score_df[~pdm_score_df["valid"]]["token"].to_list()
-    else:
-        failed_tokens = []
-
-    score_cols = [
+def _score_columns(pdm_score_df: pd.DataFrame) -> List[str]:
+    return [
         c
         for c in pdm_score_df.columns
         if (
-                (any(score.name in c for score in
-                     fields(PDMResults)) or c == "two_frame_extended_comfort" or c == "score")
-                and c != "pdm_score"
+            (any(score.name in c for score in fields(PDMResults)) or c == "two_frame_extended_comfort" or c == "score")
+            and c != "pdm_score"
         )
     ]
 
+
+def _numeric_mean(df: pd.DataFrame, score_cols: List[str]) -> pd.Series:
+    if df.empty:
+        return pd.Series({col: np.nan for col in score_cols})
+    return df[score_cols].apply(pd.to_numeric, errors="coerce").mean(skipna=True)
+
+
+def _drop_internal_score_columns(pdm_score_df: pd.DataFrame) -> pd.DataFrame:
+    return pdm_score_df.drop(
+        columns=[
+            c
+            for c in ["weighted_metrics", "weighted_metrics_array", "multiplicative_metrics_prod", "ego_simulated_states"]
+            if c in pdm_score_df.columns
+        ],
+        errors="ignore",
+    )
+
+
+def _finalize_two_stage_scores(
+    pdm_score_df: pd.DataFrame, cfg: DictConfig, scene_loader: SceneLoader
+) -> pd.DataFrame:
+    raw_mapping = cfg.train_test_split.get("reactive_all_mapping")
+    if not raw_mapping:
+        raise ValueError("train_test_split.reactive_all_mapping is empty; cannot compute two-stage scores.")
+
+    scene_tokens = set(scene_loader.tokens)
+    all_mappings: Dict[Tuple[str, str], List[Tuple[str, str]]] = {}
+    for orig_token, prev_token, two_stage_pairs in raw_mapping:
+        if prev_token in scene_tokens or orig_token in scene_tokens:
+            all_mappings[(orig_token, prev_token)] = [tuple(pair) for pair in two_stage_pairs]
+
+    if not all_mappings:
+        raise ValueError("No two-stage mapping matched the loaded scenes.")
+
+    pdm_score_df = create_scene_aggregators(
+        all_mappings, pdm_score_df, instantiate(cfg.simulator.proposal_sampling)
+    )
+    pdm_score_df = compute_final_scores(pdm_score_df)
+
+    score_cols = _score_columns(pdm_score_df)
     pcl_group_score, pcl_stage1_score, pcl_stage2_score = calculate_individual_mapping_scores(
         pdm_score_df[score_cols + ["token", "weight"]], all_mappings
     )
@@ -354,7 +276,7 @@ def main(cfg: DictConfig) -> None:
 
     stage1_row = pd.Series(index=pdm_score_df.columns, dtype=object)
     stage1_row["token"] = "extended_pdm_score_stage_one"
-    stage1_row["valid"] = pseudo_closed_loop_valid
+    stage1_row["valid"] = True
     stage1_row["score"] = pcl_stage1_score.get("score", np.nan)
     for col in pcl_stage1_score.index:
         if col not in ["token", "valid", "score"]:
@@ -363,7 +285,7 @@ def main(cfg: DictConfig) -> None:
 
     stage2_row = pd.Series(index=pdm_score_df.columns, dtype=object)
     stage2_row["token"] = "extended_pdm_score_stage_two"
-    stage2_row["valid"] = pseudo_closed_loop_valid
+    stage2_row["valid"] = True
     stage2_row["score"] = pcl_stage2_score.get("score", np.nan)
     for col in pcl_stage2_score.index:
         if col not in ["token", "valid", "score"]:
@@ -372,8 +294,8 @@ def main(cfg: DictConfig) -> None:
 
     combined_row = pd.Series(index=pdm_score_df.columns, dtype=object)
     combined_row["token"] = "extended_pdm_score_combined"
-    combined_row["valid"] = pseudo_closed_loop_valid
-    combined_row["score"] = pcl_group_score["score"]
+    combined_row["valid"] = True
+    combined_row["score"] = pcl_group_score.get("score", np.nan)
 
     for col in pcl_stage1_score.index:
         if col not in ["token", "valid", "score"]:
@@ -385,18 +307,307 @@ def main(cfg: DictConfig) -> None:
     summary_rows.append(combined_row)
 
     pdm_score_df = pd.concat([pdm_score_df, pd.DataFrame(summary_rows)], ignore_index=True)
+    pdm_score_df["aggregation_mode"] = "two_stage"
+    return pdm_score_df
 
+
+def _finalize_one_stage_scores(pdm_score_df: pd.DataFrame, cfg: DictConfig) -> pd.DataFrame:
+    pdm_score_df = pdm_score_df.copy()
+
+    try:
+        start_adjacent_mapping = infer_start_adjacent_mapping(pdm_score_df)
+        if start_adjacent_mapping:
+            pdm_score_df = create_one_stage_scene_aggregators(
+                start_adjacent_mapping, pdm_score_df, instantiate(cfg.simulator.proposal_sampling)
+            )
+            pdm_score_df = compute_one_stage_final_scores(pdm_score_df)
+        else:
+            logger.warning("No adjacent one-stage mapping found; scoring without two-frame extended comfort.")
+            if "score" not in pdm_score_df.columns:
+                pdm_score_df["score"] = pdm_score_df["pdm_score"] if "pdm_score" in pdm_score_df.columns else np.nan
+            pdm_score_df["two_frame_extended_comfort"] = np.nan
+            pdm_score_df = _drop_internal_score_columns(pdm_score_df)
+
+    except Exception:
+        logger.exception("Failed to calculate one-stage two-frame comfort; using raw pdm_score fallback.")
+        if "score" not in pdm_score_df.columns:
+            pdm_score_df["score"] = pdm_score_df["pdm_score"] if "pdm_score" in pdm_score_df.columns else np.nan
+        if "two_frame_extended_comfort" not in pdm_score_df.columns:
+            pdm_score_df["two_frame_extended_comfort"] = np.nan
+        pdm_score_df = _drop_internal_score_columns(pdm_score_df)
+
+    score_cols = list(dict.fromkeys(_score_columns(pdm_score_df)))
+    if "score" in pdm_score_df.columns and "score" not in score_cols:
+        score_cols.append("score")
+
+    valid_mask = pdm_score_df["valid"].fillna(False).astype(bool)
+    summary_source = pdm_score_df.loc[valid_mask, score_cols]
+    if summary_source.empty:
+        summary_source = pdm_score_df[score_cols]
+    average_scores = _numeric_mean(summary_source, score_cols)
+    all_scenarios_valid = bool(valid_mask.all())
+
+    pdm_score_df = pdm_score_df[["token", "valid"] + score_cols]
+    summary_rows = []
+
+    average_row = pd.Series(index=pdm_score_df.columns, dtype=object)
+    average_row.loc[average_scores.index] = average_scores
+    average_row["token"] = "average_all_frames"
+    average_row["valid"] = all_scenarios_valid
+    summary_rows.append(average_row)
+
+    stage1_row = pd.Series(index=pdm_score_df.columns, dtype=object)
+    stage1_row.loc[average_scores.index] = average_scores
+    stage1_row["token"] = "extended_pdm_score_stage_one"
+    stage1_row["valid"] = all_scenarios_valid
+    summary_rows.append(stage1_row)
+
+    stage2_row = pd.Series(index=pdm_score_df.columns, dtype=object)
+    stage2_row["token"] = "extended_pdm_score_stage_two"
+    stage2_row["valid"] = False
+    stage2_row["score"] = np.nan
+    summary_rows.append(stage2_row)
+
+    combined_row = pd.Series(index=pdm_score_df.columns, dtype=object)
+    combined_row.loc[average_scores.index] = average_scores
+    combined_row["token"] = "extended_pdm_score_combined"
+    combined_row["valid"] = all_scenarios_valid
+    summary_rows.append(combined_row)
+
+    pdm_score_df = pd.concat([pdm_score_df, pd.DataFrame(summary_rows)], ignore_index=True)
+    pdm_score_df["aggregation_mode"] = "one_stage_fallback"
+    return pdm_score_df
+
+
+def _finalize_minimal_scores(pdm_score_df: pd.DataFrame) -> pd.DataFrame:
+    pdm_score_df = pdm_score_df.copy()
+
+    if "score" not in pdm_score_df.columns:
+        pdm_score_df["score"] = pdm_score_df["pdm_score"] if "pdm_score" in pdm_score_df.columns else np.nan
+    if "two_frame_extended_comfort" not in pdm_score_df.columns:
+        pdm_score_df["two_frame_extended_comfort"] = np.nan
+
+    pdm_score_df = _drop_internal_score_columns(pdm_score_df)
+    score_cols = list(dict.fromkeys(_score_columns(pdm_score_df)))
+    if "score" in pdm_score_df.columns and "score" not in score_cols:
+        score_cols.append("score")
+
+    if "token" not in pdm_score_df.columns:
+        pdm_score_df["token"] = pdm_score_df.index.astype(str)
+    if "valid" not in pdm_score_df.columns:
+        pdm_score_df["valid"] = False
+
+    valid_mask = pdm_score_df["valid"].fillna(False).astype(bool)
+    summary_source = pdm_score_df.loc[valid_mask, score_cols]
+    if summary_source.empty:
+        summary_source = pdm_score_df[score_cols]
+    average_scores = _numeric_mean(summary_source, score_cols)
+    all_scenarios_valid = bool(valid_mask.all())
+
+    pdm_score_df = pdm_score_df[["token", "valid"] + score_cols]
+    summary_rows = []
+
+    average_row = pd.Series(index=pdm_score_df.columns, dtype=object)
+    average_row.loc[average_scores.index] = average_scores
+    average_row["token"] = "average_all_frames"
+    average_row["valid"] = all_scenarios_valid
+    summary_rows.append(average_row)
+
+    stage1_row = pd.Series(index=pdm_score_df.columns, dtype=object)
+    stage1_row.loc[average_scores.index] = average_scores
+    stage1_row["token"] = "extended_pdm_score_stage_one"
+    stage1_row["valid"] = all_scenarios_valid
+    summary_rows.append(stage1_row)
+
+    stage2_row = pd.Series(index=pdm_score_df.columns, dtype=object)
+    stage2_row["token"] = "extended_pdm_score_stage_two"
+    stage2_row["valid"] = False
+    stage2_row["score"] = np.nan
+    summary_rows.append(stage2_row)
+
+    combined_row = pd.Series(index=pdm_score_df.columns, dtype=object)
+    combined_row.loc[average_scores.index] = average_scores
+    combined_row["token"] = "extended_pdm_score_combined"
+    combined_row["valid"] = all_scenarios_valid
+    summary_rows.append(combined_row)
+
+    pdm_score_df = pd.concat([pdm_score_df, pd.DataFrame(summary_rows)], ignore_index=True)
+    pdm_score_df["aggregation_mode"] = "minimal_raw_fallback"
+    return pdm_score_df
+
+
+@hydra.main(config_path=CONFIG_PATH, config_name=CONFIG_NAME, version_base=None)
+def main(cfg: DictConfig) -> None:
+    """
+    Main entrypoint for running PDMS evaluation.
+    :param cfg: omegaconf dictionary
+    """
+
+    build_logger(cfg)
+    combined = cfg.get('combined_inference', False)
+
+    print(f'Combined inference: {combined}')
+    dump_path = os.getenv('SUBSCORE_PATH')
+    print(f'Subscore/Trajectories saved to {dump_path}')
+    skip_infer = os.getenv('SKIP_INFER', '').lower() in ('1', 'true', 'yes')
+    if skip_infer and not (dump_path and os.path.isfile(dump_path)):
+        raise FileNotFoundError(f"SKIP_INFER=1 but pickle not found: {dump_path}")
+
+    scene_filter = instantiate(cfg.train_test_split.scene_filter)
+    scene_loader = SceneLoader(
+        synthetic_sensor_path=None,
+        original_sensor_path=None,
+        data_path=Path(cfg.navsim_log_path),
+        synthetic_scenes_path=Path(cfg.synthetic_scenes_path),
+        scene_filter=scene_filter,
+        sensor_config=SensorConfig.build_no_sensors(),
+    )
+
+    metric_cache_loader = MetricCacheLoader(Path(cfg.metric_cache_path))
+
+    tokens_to_evaluate = list(set(scene_loader.tokens) & set(metric_cache_loader.tokens))
+    num_missing_metric_cache_tokens = len(set(scene_loader.tokens) - set(metric_cache_loader.tokens))
+    num_unused_metric_cache_tokens = len(set(metric_cache_loader.tokens) - set(scene_loader.tokens))
+    if num_missing_metric_cache_tokens > 0:
+        logger.warning(f"Missing metric cache for {num_missing_metric_cache_tokens} tokens. Skipping these tokens.")
+    if num_unused_metric_cache_tokens > 0:
+        logger.warning(f"Unused metric cache for {num_unused_metric_cache_tokens} tokens. Skipping these tokens.")
+    logger.info(f"Starting pdm scoring of {len(tokens_to_evaluate)} scenarios...")
+
+    if skip_infer:
+        logger.info(f"SKIP_INFER=1, loading proposals from {dump_path}")
+        merged_predictions = pickle.load(open(dump_path, 'rb'))
+    else:
+        # gpu inference
+        agent: AbstractAgent = instantiate(cfg.agent)
+        agent.initialize()
+
+        scene_loader_inference = SceneLoader(
+            synthetic_sensor_path=Path(cfg.synthetic_sensor_path),
+            original_sensor_path=Path(cfg.original_sensor_path),
+            data_path=Path(cfg.navsim_log_path),
+            synthetic_scenes_path=Path(cfg.synthetic_scenes_path),
+            scene_filter=scene_filter,
+            sensor_config=agent.get_sensor_config(),
+        )
+        dataset = Dataset(
+            scene_loader=scene_loader_inference,
+            feature_builders=agent.get_feature_builders(),
+            target_builders=agent.get_target_builders(),
+            cache_path=None,
+            force_cache_computation=False,
+            append_token_to_batch=True,
+            is_training=False
+        )
+        dataloader = DataLoader(dataset, **cfg.dataloader.params, shuffle=False)
+
+        trainer = pl.Trainer(**cfg.trainer.params, callbacks=agent.get_training_callbacks())
+        predictions = trainer.predict(
+            AgentLightningModule(
+                agent=agent,
+                combined=combined
+            ),
+            dataloader,
+            return_predictions=True
+        )
+
+        # Single-GPU predict does not init a process group; only barrier/gather when DDP is active.
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
+            all_predictions = [None for _ in range(dist.get_world_size())]
+            dist.all_gather_object(all_predictions, predictions)
+            if dist.get_rank() != 0:
+                return None
+        else:
+            all_predictions = [predictions]
+
+        merged_predictions = {}
+        for proc_prediction in all_predictions:
+            for d in proc_prediction:
+                merged_predictions.update(d)
+
+        pickle.dump(merged_predictions, open(dump_path, 'wb'))
+        logger.info(f"Wrote proposals/subscores to {dump_path}")
+
+    # Only ship trajectories to Ray workers (full prediction dict is multi-GB).
+    scoring_predictions = {
+        token: {"trajectory": prediction["trajectory"]}
+        for token, prediction in merged_predictions.items()
+    }
+    del merged_predictions
+
+    data_points = [
+        {
+            "cfg": cfg,
+            "log_file": log_file,
+            "tokens": tokens_list,
+            "model_trajectory": {
+                token: scoring_predictions[token]
+                for token in tokens_list
+                if token in scoring_predictions
+            },
+        }
+        for log_file, tokens_list in scene_loader.get_tokens_list_per_log().items()
+    ]
+
+    worker = build_worker(cfg)
+    score_rows: List[pd.DataFrame] = worker_map(worker, run_pdm_score, data_points)
+
+    raw_pdm_score_df = pd.concat(score_rows, ignore_index=True)
     save_path = Path(cfg.output_dir)
+    save_path.mkdir(parents=True, exist_ok=True)
+    raw_score_path = save_path / "raw_pdm_score.pkl"
+    try:
+        with open(raw_score_path, "wb") as f:
+            pickle.dump(raw_pdm_score_df, f)
+        logger.info(f"Raw PDM score rows are stored in: {raw_score_path}.")
+    except Exception:
+        logger.exception("Failed to save raw PDM score rows; continuing to final aggregation.")
+
+    num_sucessful_scenarios = int(raw_pdm_score_df["valid"].fillna(False).sum())
+    num_failed_scenarios = len(raw_pdm_score_df) - num_sucessful_scenarios
+    if num_failed_scenarios > 0:
+        failed_tokens = raw_pdm_score_df[~raw_pdm_score_df["valid"].fillna(False)]["token"].to_list()
+    else:
+        failed_tokens = []
+
+    if cfg.train_test_split.get("reactive_all_mapping"):
+        try:
+            pdm_score_df = _finalize_two_stage_scores(raw_pdm_score_df.copy(), cfg, scene_loader)
+        except Exception:
+            logger.exception("Two-stage final aggregation failed; writing one-stage fallback CSV instead.")
+            try:
+                pdm_score_df = _finalize_one_stage_scores(raw_pdm_score_df.copy(), cfg)
+            except Exception:
+                logger.exception("One-stage fallback aggregation failed; writing minimal raw fallback CSV instead.")
+                pdm_score_df = _finalize_minimal_scores(raw_pdm_score_df.copy())
+    else:
+        logger.warning("No train_test_split.reactive_all_mapping configured; writing one-stage fallback CSV.")
+        try:
+            pdm_score_df = _finalize_one_stage_scores(raw_pdm_score_df.copy(), cfg)
+        except Exception:
+            logger.exception("One-stage fallback aggregation failed; writing minimal raw fallback CSV instead.")
+            pdm_score_df = _finalize_minimal_scores(raw_pdm_score_df.copy())
+
     timestamp = datetime.now().strftime("%Y.%m.%d.%H.%M.%S")
-    pdm_score_df.to_csv(save_path / f"{timestamp}.csv")
+    csv_path = save_path / f"{timestamp}.csv"
+    pdm_score_df.to_csv(csv_path)
+
+    final_score_rows = pdm_score_df[pdm_score_df["token"] == "extended_pdm_score_combined"]
+    final_score = final_score_rows["score"].iloc[0] if not final_score_rows.empty else np.nan
+    aggregation_mode = (
+        pdm_score_df["aggregation_mode"].iloc[0] if "aggregation_mode" in pdm_score_df.columns else "unknown"
+    )
 
     logger.info(
         f"""
         Finished running evaluation.
             Number of successful scenarios: {num_sucessful_scenarios}.
             Number of failed scenarios: {num_failed_scenarios}.
-            Final extended pdm score of valid results: {pdm_score_df[pdm_score_df["token"] == "extended_pdm_score_combined"]["score"].iloc[0]}.
-            Results are stored in: {save_path / f"{timestamp}.csv"}.
+            Aggregation mode: {aggregation_mode}.
+            Final extended pdm score of valid results: {final_score}.
+            Raw score rows are stored in: {raw_score_path}.
+            Results are stored in: {csv_path}.
         """
     )
 

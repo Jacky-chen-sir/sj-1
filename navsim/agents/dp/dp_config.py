@@ -43,6 +43,16 @@ class DPConfig(TransfuserConfig):
     denoising_timesteps: int = 100
     use_temporal_bev_kv: bool = False
 
+    # Flow Matching / Rectified Flow (trajectory decoder only; architecture unchanged).
+    # Default False keeps official DDPM behavior so existing eval scripts still work.
+    use_flow_matching: bool = False
+    fm_num_inference_steps: int = 20
+    fm_sigma_min: float = 1e-4
+    freeze_except_traj_head: bool = False
+    # When True: load official ckpt for backbone/BEV/etc, but randomly re-init
+    # `_trajectory_head` so FM is trained from scratch (do not reuse DDPM epsilon weights).
+    reinit_traj_head: bool = False
+
     seq_len: int = 2
     trajectory_imi_weight: float = 1.0
     trajectory_pdm_weight = {
