@@ -65,14 +65,16 @@ def _teacher_cache(cfg, match_student=None):
 
 
 def _peaked(idx_sets):
-    """构造尖峰分数：idx_sets 里的位置给 +10，其余 -10。
+    """构造尖峰分数：idx_sets 里的位置给 +15，其余 -15。
 
     用于 recall 下界测试——随机 randn 分数经 τ=2 软化后 top-32 的概率质量只有几个百分点，
     拿它断言 "recall≈0" 是不成立的；要断言的是"教师 Top-K' 恰为学生高分集合时 recall→0"。
+    注意 τ=2 会把峰谷差减半：±10 时理论下界 = -log(1-255·e^{-10}) ≈ 0.0115，
+    会顶穿 1e-2 的断言阈值；±15 时下界 ≈ 255·e^{-15} ≈ 8e-5，留出足够裕量。
     """
-    s = torch.full((B, V), -10.0)
+    s = torch.full((B, V), -15.0)
     for b, idx in enumerate(idx_sets):
-        s[b, idx] = 10.0
+        s[b, idx] = 15.0
     return s
 
 
@@ -220,14 +222,28 @@ def test_valid_mask_zero_gives_zero_and_backprop_ok():
             assert p.grad is not None, f'{name} has no grad after all-invalid backward'
 
 
-def test_tau_to_inf_coarse_kl_goes_to_zero():
-    """τ→∞ 时分布退化成均匀，KL→0。"""
-    cfg = _cfg(tau_imi=1e6)
+def test_tau_large_kl_vanishes_but_tau2_scaled_hits_fisher_limit():
+    """τ→∞ 时分布退化成均匀：未乘 τ² 的 KL→0，但 τ²·KL 收敛到 Fisher（梯度匹配）极限
+    ½·Var_v(s−t)——这正是 KD 要乘 τ² 的原因（τ 再大监督信号也不消失）。
+
+    实现内部 `.float()` 强制 fp32，τ 不能取太大：logit 差 ~1/τ 被 fp32 舍入噪声
+    （~1e-6 量级）淹没后 ×τ² 会放大成垃圾（τ=1e4 已偏 10 倍，τ=1e6 甚至算出负"KL"）。
+    实测 τ∈[50,200] 时 fp32 与 Fisher 极限吻合到 <1%，故取 τ=100。
+    """
+    tau = 100.0
+    cfg = _cfg(tau_imi=tau)
     opd = _import_loss()
     preds = _student_preds()
     preds['coarse_fused_score'] = torch.randn(B, V)
-    total, d = opd(preds, _teacher_cache(cfg), cfg)
-    assert d['distill_imi'].abs() < 1e-2, d['distill_imi']
+    cache = _teacher_cache(cfg)
+    total, d = opd(preds, cache, cfg)
+    # 1) 未缩放的 KL 已退化到 ~1e-4（τ=1 时是 O(1)），确证分布→均匀
+    assert (d['distill_imi'].abs() / tau ** 2) < 5e-4, d['distill_imi']
+    # 2) τ² 缩放后的值 ≈ Fisher 极限 ½·E[Var_v(s−t)]（s,t~randn ⇒ 期望 ≈1，不是 0）
+    delta = preds['imi'] - cache['imi']
+    delta = delta - delta.mean(dim=-1, keepdim=True)
+    fisher = 0.5 * delta.pow(2).mean(dim=-1).mean()  # ½·Var_v，batch 取均值
+    assert torch.allclose(d['distill_imi'], fisher, rtol=0.05), (d['distill_imi'], fisher)
 
 
 def test_recall_floor_at_uniform():
