@@ -45,7 +45,7 @@ def dp_loss_bev(
 ):
     # B, 8 (4 secs, 0.5Hz), 3
     target_traj = targets["trajectory"]
-    dp_loss = traj_head.get_dp_loss(predictions['env_kv'], target_traj.float())
+    dp_loss, dp_extras = traj_head.get_dp_loss(predictions['env_kv'], target_traj.float())
     bev_semantic_loss = F.cross_entropy(predictions["bev_semantic_map"], targets["bev_semantic_map"].long())
     dp_loss = dp_loss * config.dp_loss_weight
     bev_semantic_loss = bev_semantic_loss * config.bev_loss_weight
@@ -53,10 +53,13 @@ def dp_loss_bev(
             dp_loss +
             bev_semantic_loss
     )
-    return loss, {
+    loss_dict = {
         'dp_loss': dp_loss,
         'bev_semantic_loss': bev_semantic_loss
     }
+    # detached FM diagnostics (fm_aux_* / fm_x1_ade / fm_x1_fde); empty dict for DDPM
+    loss_dict.update(dp_extras)
+    return loss, loss_dict
 
 
 class DPAgent(AbstractAgent):
@@ -113,6 +116,19 @@ class DPAgent(AbstractAgent):
         if reinit_traj_head:
             cleaned = {k: v for k, v in cleaned.items() if "_trajectory_head" not in k}
             load_result = self.load_state_dict(cleaned, strict=False)
+            # strict=False otherwise hides *any* key mismatch: a renamed backbone key would
+            # leave the backbone randomly initialized while training starts and loss still
+            # "goes down". Assert the missing set is exactly the head we deliberately dropped.
+            unexpected = list(load_result.unexpected_keys)
+            stray_missing = [k for k in load_result.missing_keys if "_trajectory_head" not in k]
+            assert not stray_missing, (
+                f"reinit_traj_head=True dropped only _trajectory_head, but these non-head keys "
+                f"are also missing from the checkpoint (they would stay randomly initialized): "
+                f"{stray_missing[:20]}"
+            )
+            assert not unexpected, (
+                f"checkpoint has keys the model does not define: {unexpected[:20]}"
+            )
             logger.info(
                 f"Loaded DP checkpoint from {self._checkpoint_path} "
                 f"(skipped _trajectory_head; missing={len(load_result.missing_keys)}, "
@@ -120,6 +136,14 @@ class DPAgent(AbstractAgent):
             )
             self._reinit_trajectory_head()
         else:
+            if getattr(self._config, 'use_flow_matching', False) and any(
+                    '_trajectory_head' in k for k in cleaned):
+                logger.warning(
+                    "use_flow_matching=True but _trajectory_head weights were loaded from an "
+                    "(official DDPM epsilon-prediction) checkpoint. An epsilon-prediction is NOT "
+                    "an FM velocity field; set reinit_traj_head=True unless this ckpt was itself "
+                    "trained with use_flow_matching=True."
+                )
             load_result = self.load_state_dict(cleaned, strict=True)
             logger.info(
                 f"Loaded DP checkpoint from {self._checkpoint_path} "
@@ -207,6 +231,16 @@ class DPAgent(AbstractAgent):
             dirpath=f"{os.environ.get('NAVSIM_EXP_ROOT')}/{self._config.ckpt_path}/",
             filename="{epoch:02d}-{step:04d}",
         )
+        # Mid-epoch snapshots so a late-epoch crash does not lose ~hours of work
+        # (ported from gtrs_aug agent).
+        step_callback = ModelCheckpoint(
+            every_n_train_steps=1000,
+            save_on_train_epoch_end=False,
+            save_top_k=-1,
+            dirpath=f"{os.environ.get('NAVSIM_EXP_ROOT')}/{self._config.ckpt_path}/",
+            filename="step-{step:06d}",
+        )
         return [
-            ckpt_callback
+            ckpt_callback,
+            step_callback,
         ]

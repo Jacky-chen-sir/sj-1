@@ -41,6 +41,8 @@ class DPConfig(TransfuserConfig):
 
     norm_accel: bool = False
     denoising_timesteps: int = 100
+    # DDPM baseline 的推理步数（默认 100 = 官方）；和 FM 对比时建议设成相同步数预算
+    ddpm_num_inference_steps: int = 100
     use_temporal_bev_kv: bool = False
 
     # Flow Matching / Rectified Flow (trajectory decoder only; architecture unchanged).
@@ -52,6 +54,44 @@ class DPConfig(TransfuserConfig):
     # When True: load official ckpt for backbone/BEV/etc, but randomly re-init
     # `_trajectory_head` so FM is trained from scratch (do not reuse DDPM epsilon weights).
     reinit_traj_head: bool = False
+
+    # —— FM 辅助监督（归一化增量空间，残差除以 t_eff 后与主损失同量纲），0 = 关闭 ——
+    # 低频：增量累积误差（漂移 → ADE/FDE）
+    fm_traj_aux_weight: float = 0.5
+    fm_traj_aux_pos_weight: float = 1.0
+    # 航向：单位化后的 1-cos(Δθ)，有界且已 wrap
+    fm_traj_aux_head_weight: float = 1.0
+    # 高频：增量的一阶（加速度）与二阶（jerk）差分误差，直接对应 comfort 子指标
+    fm_kin_weight: float = 0.5
+    # 辅助/运动学损失里 1/t_eff 的分母下界，防 t→0 放大噪声
+    fm_aux_t_floor: float = 0.05
+
+    # —— FM 训推对齐 ——
+    # t∈[0,1] 映射到 [0, T-1]（推理首步 t=100 > 训练见过的 0..99，属 OOD）
+    fm_time_align: bool = True
+    # 以该概率在推理 Euler 网格 {k/K} 上采样 t；0 = 纯均匀采样
+    fm_lattice_t_prob: float = 0.5
+    # 训练时 K 从这个集合里逐样本抽取。**评测要扫的每个 K 都必须在这里**，
+    # 否则该 K 的 {k/K} 与训练格点只在 t=1 相交，步数扫描曲线会被 OOD artifact 污染。
+    fm_lattice_k_set: Tuple[int, ...] = (2, 3, 4, 5, 8, 10, 20)
+    # x̂1 裁剪（= DDPM clip_sample 在 FM 下的正确对应：裁剪隐含的干净样本再反解速度）。
+    # 归一化增量的合法范围恰为 [-1,1]；少步采样外推后 cumsum 会按 ~4.5x/步 放大。
+    fm_clip_sample: bool = True
+    fm_clip_range: float = 1.0
+
+    # —— 自洽监督：用模型自己积分出的中间态替代真值插值点 ——
+    # 标准 CFM 在真值插值点 x_t 上监督恒定目标 (x1-noise)，但推理时状态由模型自回归积分
+    # 产生并偏离该点，恒定目标无法纠偏，误差沿积分步累积。这里以 p 的概率改为：先 no_grad
+    # 积分到 x̂_t，再监督动态剩余速度 (1-s)(x1-x̂_t)/t_eff（x̂_t 准确时精确退化为标准目标）。
+    # 建议在已收敛的 ckpt 上续训开启；从零训练时靠 warmup 兜底。
+    fm_self_consistency_p: float = 0.5
+    fm_sc_max_steps: int = 4
+    fm_sc_warmup_steps: int = 2000
+    fm_sc_target_clip: float = 6.0
+    # 自条件（self-conditioning）：解码器额外输入上一轮的 x1 估计，缓解少步采样外推误差。
+    # 改变 input_emb 的 in_features；dp_agent 加载时会把旧权重零填充扩列，故可直接续训。
+    fm_self_conditioning: bool = True
+    fm_self_cond_p: float = 0.5
 
     seq_len: int = 2
     trajectory_imi_weight: float = 1.0

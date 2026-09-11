@@ -32,6 +32,14 @@ gpu="${GPU:-0}"
 workers="${WORKERS:-8}"
 batch_size="${BS:-${BATCH_SIZE:-8}}"
 fm_steps="${FM_NUM_INFERENCE_STEPS:-20}"
+# 必须与训练时一致：自条件改变 input_emb 的 in_features，不传就会 size mismatch 直接抛异常。
+# 裁剪也要带上，否则少步（K=2/3）评测会外推出离分布很远的增量。
+fm_self_conditioning="${FM_SELF_CONDITIONING:-true}"
+fm_clip_sample="${FM_CLIP_SAMPLE:-true}"
+# 步数扫描建议只取训练 K 集合里的值（默认 2/3/4/5/8/10/20），集合外的 K 属 OOD
+if [ -n "${FM_STEPS_SWEEP:-}" ]; then
+  echo "[INFO] FM_STEPS_SWEEP=${FM_STEPS_SWEEP} — 逐个 K 跑，确认每个 K 都在训练的 k_set 内"
+fi
 
 DEFAULT_CKPT="$(ls -1t "${NAVSIM_EXP_ROOT}/train_dp_official_fm_joint"/epoch=*.ckpt 2>/dev/null | head -n 1 || true)"
 ckpt="${CKPT:-${DEFAULT_CKPT}}"
@@ -90,7 +98,7 @@ conda activate conda_gtrs
 echo "[RUN] FM joint DP navtest evaluation"
 echo "      ckpt=${ckpt}"
 echo "      split=${split} gpu=${gpu} bs=${batch_size} workers=${workers}"
-echo "      fm_steps=${fm_steps}"
+echo "      fm_steps=${fm_steps} self_cond=${fm_self_conditioning} clip=${fm_clip_sample}"
 echo "      subscore=${SUBSCORE_PATH}"
 echo "      experiment=${experiment_name}"
 
@@ -109,6 +117,8 @@ CUDA_VISIBLE_DEVICES="${gpu}" python "${NAVSIM_DEVKIT_ROOT}/navsim/planning/scri
   worker.log_to_driver=false \
   ++agent.config.use_flow_matching=true \
   ++agent.config.fm_num_inference_steps="${fm_steps}" \
+  ++agent.config.fm_self_conditioning="${fm_self_conditioning}" \
+  ++agent.config.fm_clip_sample="${fm_clip_sample}" \
   experiment_name="${experiment_name}" \
   +cache_path=null \
   metric_cache_path="${metric_cache_path}" \
