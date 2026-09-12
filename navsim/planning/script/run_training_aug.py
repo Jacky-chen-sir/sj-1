@@ -15,6 +15,7 @@
 
 import datetime
 import logging
+import os
 from functools import partial
 from pathlib import Path
 from typing import Tuple
@@ -197,10 +198,20 @@ def main(cfg: DictConfig) -> None:
         trainer = pl.Trainer(**cfg.trainer.params,
                              callbacks=agent.get_training_callbacks())
     else:
+        # DDP_FIND_UNUSED=1: static_graph=False + find_unused_parameters=True。
+        # 用于 OPD 等带梯度累积（accumulate_grad_batches>1）的训练——static_graph=True
+        # 与梯度累积不兼容（首步 backward 即 expect_autograd_hooks_ INTERNAL ASSERT），
+        # 且 TrajOffsetHead.encoder 等 12 个参数本就不参与损失（normalize_vocab_pos 的
+        # 遗留模块），find_unused=True 让它们被安静跳过。默认保持原行为不变。
+        if os.getenv("DDP_FIND_UNUSED", "0") == "1":
+            strategy = DDPStrategy(static_graph=False, find_unused_parameters=True,
+                                   timeout=datetime.timedelta(seconds=3600))
+        else:
+            strategy = DDPStrategy(static_graph=True,
+                                   timeout=datetime.timedelta(seconds=3600))
         trainer = pl.Trainer(**cfg.trainer.params,
                              callbacks=agent.get_training_callbacks(),
-                             strategy=DDPStrategy(static_graph=True,
-                                                  timeout=datetime.timedelta(seconds=3600)))
+                             strategy=strategy)
 
     logger.info("Starting Training")
     trainer.fit(
