@@ -128,7 +128,13 @@ class HydraBackbone(nn.Module):
 
     def _encode(self, image, **kwargs):
         if self._is_davit:
-            image_feat = self.image_encoder(image, **kwargs)[-1]
+            # DAViT 的 get_intermediate_layers 在 return_class_token=True 时返回
+            # (feat, cls) 对的元组，[-1] 取到的是 pair 而不是特征图（forward_tup 会
+            # 对 pair 调 .mean 直接 AttributeError）。GTRS 侧的 class_token 本来就是
+            # mean-pool 派生且下游无人消费，这里强制 False，与 DriveSuprim 官方
+            # ViT 前向（return_class_token=False）逐位一致。
+            kwargs.pop('return_class_token', None)
+            image_feat = self.image_encoder(image, return_class_token=False, **kwargs)[-1]
         else:
             image_feat = self.image_encoder(image)[-1]
         return image_feat
