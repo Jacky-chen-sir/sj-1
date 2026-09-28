@@ -1,0 +1,51 @@
+# python
+*.pyc
+**/__pycache__/
+.pytest_cache/*
+.pydevproject
+
+# IDE
+.vscode/*
+lightning_logs/
+lightning_logs/*
+lightning_logs
+# Pip
+*.egg-info
+
+# files
+*.log
+*.pkl
+*.jpg
+*.pcd
+
+# exp
+exp
+
+# data
+dataset
+
+# lsf
+*.bsub
+
+# running scripts
+scripts_dev/*
+
+# python
+build/
+vocab_score_local/
+vocab_score_full/
+vocab_score_full_8192/
+vocab_score_local_8192/
+models_local/
+traj_local/
+*.so
+
+dist/
+
+.idea/
+debug/
+# IDE
+
+
+temp-test-code/*
+!temp-test-code/*.py
