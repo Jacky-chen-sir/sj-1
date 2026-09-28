@@ -126,5 +126,9 @@ config:
     update_buffer_in_ema: false
     save_pickle: false
 
+  opd:
+    _target_: navsim.agents.gtrs_aug.hydra_config_aug.OPDConfig
+    enable: false
+
 checkpoint_path: null
 lr: 1e-4

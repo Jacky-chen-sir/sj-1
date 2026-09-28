@@ -26,6 +26,24 @@ from navsim.agents.transfuser.transfuser_config import TransfuserConfig
 NAVSIM_DEVKIT_ROOT = os.environ.get("NAVSIM_DEVKIT_ROOT")
 
 
+def get_opd_config(config):
+    """Read config.opd without crashing OmegaConf struct (missing key is not getattr-safe)."""
+    from omegaconf import DictConfig, OmegaConf
+
+    if isinstance(config, DictConfig):
+        return OmegaConf.select(config, "opd", default=None)
+    return getattr(config, "opd", None)
+
+
+def is_opd_offline(config) -> bool:
+    opd = get_opd_config(config)
+    if opd is None:
+        return False
+    enable = opd.get("enable") if isinstance(opd, dict) else getattr(opd, "enable", False)
+    mode = opd.get("teacher_mode") if isinstance(opd, dict) else getattr(opd, "teacher_mode", None)
+    return bool(enable) and mode == "offline"
+
+
 def sync_drivesuprim_config_aliases(config: "HydraConfigAug") -> "HydraConfigAug":
     """Map DriveSuprim flat fields onto nested gtrs_aug config (safe to call multiple times)."""
     if config.ego_perturb.n_student_rotation_ensemble is not None and config.ego_perturb.n_student_rotation_ensemble >= 0:

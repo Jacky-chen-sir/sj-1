@@ -212,6 +212,11 @@ def main(cfg: DictConfig) -> None:
 
     build_logger(cfg)
     pkl_path = os.getenv('SUBSCORE_PATH')
+    if not pkl_path:
+        # Hydra output_dir is always set; dumping to None used to crash after a full
+        # inference pass (TypeError: expected str, not NoneType).
+        pkl_path = str(Path(cfg.output_dir) / "subscores.pkl")
+        logger.info("SUBSCORE_PATH unset; writing proposals to %s", pkl_path)
     skip_infer = os.getenv('SKIP_INFER', '').lower() in ('1', 'true', 'yes')
     if skip_infer and not (pkl_path and os.path.isfile(pkl_path)):
         raise FileNotFoundError(f"SKIP_INFER=1 but pickle not found: {pkl_path}")

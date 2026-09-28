@@ -24,7 +24,7 @@ from torch import Tensor
 
 from navsim.agents.abstract_agent import AbstractAgent
 from navsim.agents.gtrs_aug.gtrs_aug_agent import GTRSAugAgent
-from navsim.agents.gtrs_aug.hydra_config_aug import HydraConfigAug
+from navsim.agents.gtrs_aug.hydra_config_aug import HydraConfigAug, is_opd_offline
 from navsim.agents.gtrs_aug.utils.util import CosineScheduler
 from navsim.common.dataclasses import Trajectory
 
@@ -88,7 +88,7 @@ class AgentLightningModuleAug(pl.LightningModule):
         # 只有 offline 模式才读教师缓存：'ema' 走原在线软标签教师（上面的 loss-soft 分支），
         # 'none' 是纯学生基线。这两种模式下 teacher_score_dir 被 sync 清成 None，
         # 若仍进这个分支，`os.path.join(None, ...)` 会 TypeError。
-        if self._cfg.opd.enable and self._cfg.opd.teacher_mode == 'offline':
+        if is_opd_offline(self._cfg):
             loss_opd, loss_opd_dict = self.agent.compute_loss_distill(features, targets, student_preds, tokens)
             for k, v in loss_opd_dict.items():
                 self.log(f"{logging_prefix}/{k}-opd", v, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)

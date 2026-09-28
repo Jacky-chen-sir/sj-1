@@ -4,6 +4,11 @@
 #   bash scripts/drivesuprim/training/rot_30-p_0.5/train.sh gtrs_aug_drivesuprim_vov 1 3 256
 #   bash scripts/drivesuprim/training/rot_30-p_0.5/train.sh gtrs_aug_drivesuprim_r34 1 3 256
 #   bash scripts/drivesuprim/training/rot_30-p_0.5/train.sh gtrs_aug_drivesuprim_vit 1 3 256
+#
+# 环境变量：
+#   BS（默认 8）  NPROC（默认 8）  ACCUM（默认 0=不用累积）
+#   LR（默认 7.5e-5 × 有效批量/64）  PRECISION  RESUME_CKPT  EXP_TAG  EXP_DIR  MAX_STEPS
+# 同 iter 消融：BS=3 NPROC=3 ACCUM=4 EXP_DIR=ablation_same_iter_r34/official_recipe_r34
 
 agent=$1
 num_refinement_stage=$2
@@ -50,13 +55,30 @@ fi
 echo "Using agent: $agent, setting epoch: $epoch"
 
 bs=${BS:-8}
-lr=${LR:-0.000075}
 rot=30
 probability=0.5
 nproc=${NPROC:-8}
+accum=${ACCUM:-0}
 master_port=${MASTER_PORT:-29500}
+exp_tag=${EXP_TAG:-}
 
-dir=training/$agent/rot_$rot-p_$probability/stage_layers_$stage_layers-topks_$topks
+# 有效批量 = BS × NPROC × max(ACCUM,1)。基线 LR 7.5e-5 对应 8×8=64。
+if [ "$accum" -gt 0 ]; then
+  eff_batch=$(( bs * nproc * accum ))
+else
+  eff_batch=$(( bs * nproc ))
+fi
+if [ -z "${LR:-}" ]; then
+  lr=$(awk -v e="$eff_batch" 'BEGIN{printf "%.3e", 7.5e-5 * e / 64}')
+else
+  lr=$LR
+fi
+
+if [ -n "${EXP_DIR:-}" ]; then
+  dir="$EXP_DIR"
+else
+  dir="training/$agent/rot_$rot-p_$probability/stage_layers_$stage_layers-topks_$topks${exp_tag:+-${exp_tag}}"
+fi
 
 # Prefer DriveSuprim-named offline json if present; else use existing equivalent.
 offline_json="${NAVSIM_EXP_ROOT}/offline_files/training_ego_aug_files/rot_${rot}-p_${probability}-ensemble.json"
@@ -92,12 +114,23 @@ command_string="$NAVSIM_DEVKIT_ROOT/navsim/planning/script/run_training_aug.py \
     cache_path=null
 "
 
+if [ "$accum" -gt 0 ]; then
+  command_string="$command_string ++trainer.params.accumulate_grad_batches=$accum ++trainer.params.sync_batchnorm=true"
+fi
+if [ -n "${MAX_STEPS:-}" ]; then
+  command_string="$command_string ++trainer.params.max_steps=${MAX_STEPS}"
+fi
+
 # Optional resume: RESUME_CKPT=/abs/path.ckpt bash ... (restores weights+optimizer+epoch)
 if [ -n "${RESUME_CKPT:-}" ]; then
   command_string="$command_string +resume_ckpt_path='${RESUME_CKPT}'"
   echo "[RESUME] from ${RESUME_CKPT}"
 fi
 
+echo "=== DriveSuprim-recipe train ==="
+echo "  agent    : $agent"
+echo "  dir      : $dir"
+echo "  effective: BS=$bs x NPROC=$nproc x ACCUM=${accum:-0} = $eff_batch  → LR=$lr"
 echo "--- COMMAND ---"
 echo $command_string
 echo
