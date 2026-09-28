@@ -368,6 +368,41 @@ def test_dual_stream_default_off_matches_baseline_branch():
     assert torch.equal(a, b)
 
 
+def test_safety_gate_rejects_unsafe_candidate_that_soft_score_prefers():
+    """安全门后处理：软分数会选中的「高舒适 + 预测安全 0.9」候选必须被门排除。
+
+    这是 zero_pct 的直接来源——EPDMS 的安全项是四项二值指标的乘积，软分数下
+    一个预测安全 0.9 的候选仍可能靠舒适度胜出，而它有一成概率整分归零。
+    """
+    from navsim.agents.gtrs_aug.hydra_model import safety_gate_scores
+
+    # 2 个候选：cand0 安全但舒适低，cand1 舒适高但 nc 预测很低
+    head_out = {m: torch.full((1, 2), 6.0) for m in METRICS}      # σ(6)≈0.9975
+    head_out['history_comfort'] = torch.tensor([[0.0, 6.0]])      # cand1 舒适更高
+    head_out['no_at_fault_collisions'] = torch.tensor([[6.0, -4.0]])  # cand1 碰撞风险高
+    scores = torch.tensor([[0.0, 1.0]])                           # 软分数偏好 cand1
+
+    assert scores.argmax(1).item() == 1, '前置：软分数确实选中了不安全的 cand1'
+    gated = safety_gate_scores(head_out, scores, 0.8)
+    assert gated.argmax(1).item() == 0, '安全门没有排除不安全的候选'
+    assert torch.isneginf(gated[0, 1]), '被排除的候选应置 -inf 而不是改数值'
+
+    # 关闭时逐位不变
+    assert torch.equal(safety_gate_scores(head_out, scores, 0.0), scores)
+
+
+def test_safety_gate_degrades_gracefully_when_all_candidates_unsafe():
+    """难场景里全体候选都违规时，门按场景内相对阈值自动放宽，不会出现空候选集。"""
+    from navsim.agents.gtrs_aug.hydra_model import safety_gate_scores
+
+    head_out = {m: torch.full((1, 3), 6.0) for m in METRICS}
+    head_out['no_at_fault_collisions'] = torch.tensor([[-6.0, -4.0, -8.0]])   # 全部违规
+    scores = torch.tensor([[1.0, 3.0, 2.0]])
+    gated = safety_gate_scores(head_out, scores, 0.8)
+    assert torch.isfinite(gated).any(), '全体违规时不应把候选集清空'
+    assert gated.argmax(1).item() == 1, '应保留相对最安全的那个（nc 最高的 cand1）'
+
+
 if __name__ == '__main__':
     import sys
     sys.exit(pytest.main([__file__, '-q']))

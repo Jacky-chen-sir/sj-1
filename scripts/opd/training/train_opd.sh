@@ -81,6 +81,7 @@ if [ -n "${OPD_LAMBDA_PROD:-}" ];              then opd_over+=( "++agent.config.
 if [ -n "${OPD_HEAD_SCOPE:-}" ];               then opd_over+=( "++agent.config.opd.head_scope=${OPD_HEAD_SCOPE}" ); fi
 if [ -n "${OPD_DUAL_STREAM_SCORE:-}" ];        then opd_over+=( "++agent.config.opd.dual_stream_score=${OPD_DUAL_STREAM_SCORE}" ); fi
 if [ -n "${OPD_BETA_IMI:-}" ];                 then opd_over+=( "++agent.config.opd.beta_imi=${OPD_BETA_IMI}" ); fi
+if [ -n "${OPD_SAFETY_GATE:-}" ];              then opd_over+=( "++agent.config.opd.safety_gate_ratio=${OPD_SAFETY_GATE}" ); fi
 if [ -n "${OPD_TOPK_REFINE:-}" ];              then opd_over+=( "++agent.config.opd.topk_refine=${OPD_TOPK_REFINE}" ); fi
 if [ -n "${OPD_TOPK_RECALL:-}" ];              then opd_over+=( "++agent.config.opd.topk_recall=${OPD_TOPK_RECALL}" ); fi
 if [ -n "${OPD_ON_POLICY_ROUNDS:-}" ];         then opd_over+=( "++agent.config.opd.on_policy_rounds=${OPD_ON_POLICY_ROUNDS}" ); fi

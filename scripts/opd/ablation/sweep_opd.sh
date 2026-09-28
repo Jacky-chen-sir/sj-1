@@ -51,7 +51,8 @@ im_only head_only refine_only recall_only \
 tau_imi_1 tau_imi_4 tau_head_1 tau_head_4 tau_list_1 tau_list_4 \
 no_head no_recall emis_recall_1 topk_refine_32 topk_refine_1024 \
 rounds_0 rounds_1 rounds_2 ema \
-dual_stream prod_05 prod_10 head_scope_safe dual_stream_prod"}
+dual_stream prod_05 prod_10 head_scope_safe dual_stream_prod \
+gate_off gate_05 gate_08 gate_095 legacy_all"}
 
 echo "=== OPD sweep ==="
 echo "  teacher_score_dir: $TEACHER_SCORE_DIR"
@@ -108,5 +109,21 @@ want prod_05        && run_group "prod_05"          OPD_LAMBDA_PROD=0.5
 want prod_10        && run_group "prod_10"          OPD_LAMBDA_PROD=1.0
 want head_scope_safe && run_group "head_scope_safe" OPD_HEAD_SCOPE=safe
 want dual_stream_prod && run_group "dual_stream_prod" OPD_DUAL_STREAM_SCORE=true OPD_LAMBDA_PROD=0.5
+
+# —— 安全门后处理（`opd.safety_gate_ratio`，直接压 zero_pct）——
+# 实测 best 对照 zero_pct=9.89%、OPD=15.71%，每 1 个百分点约值 0.9 EPDMS 分，
+# 是当前最大的单项损失来源。0.8 ≈「预测有安全违规的候选一律不选」。
+# gate_off 是必需的反向对照——若 gate_08 不优于 gate_off，说明安全头标定有问题，
+# 该先修预测而不是加门。
+want gate_off       && run_group "gate_off"         OPD_SAFETY_GATE=0.0
+want gate_05        && run_group "gate_05"          OPD_SAFETY_GATE=0.5
+want gate_08        && run_group "gate_08"          OPD_SAFETY_GATE=0.8
+want gate_095       && run_group "gate_095"         OPD_SAFETY_GATE=0.95
+# 一键回到改动前：双流关 + 乘积项关 + 门关（唯一的差异是 HC=2，那是有意的）。
+# ⚠ 这一格**必须配一份 legacy 教师缓存**（`OPD_DUAL_STREAM_SCORE=false` 生成的），
+# 否则训练端的一致性断言会硬报错——缓存里的 coarse/topk_idx 是双流口径的，与学生的
+# legacy 融合分数不是同一个准则，蒸馏目标本身就是错的。做法：把当前缓存目录复制一份，
+# 用 `migrate_teacher_cache.py`（不带 --dual_stream）刷回 legacy，再把它指给这一格。
+want legacy_all     && run_group "legacy_all"       OPD_DUAL_STREAM_SCORE=false OPD_LAMBDA_PROD=0 OPD_SAFETY_GATE=0.0
 
 echo "=== sweep done ==="

@@ -282,6 +282,13 @@ class OPDConfig:
     # 式 (4-8) 的 β。默认 0.02，与基线 `fused_coarse_score` 里 imi 项的系数同值，
     # 使「双流 vs 基线」的唯一变量是结构而不是 imi 先验的强弱。
     beta_imi: float = 0.02
+    # 安全门后处理（式 4-6 的乘性安全结构在**选择**上的强化）：精排最终选择前，把
+    # 「预测安全乘积 < gate_ratio × 本场景最优」的候选置 -inf。EPDMS 的安全项是四项二值
+    # 指标的乘积，软分数下高舒适但预测安全 0.9 的候选仍可能胜出，而它有一成概率整分归零。
+    # 只按场景内相对阈值判，难场景自动放宽，不会出现空候选集。
+    # **默认 0.0 = 关闭**（与 `safe_fused_score` 同理：`opd` 永不为 None，会落到所有
+    # gtrs_aug agent 的 eval 上）。OPD 配置里显式打开。
+    safety_gate_ratio: float = 0.0
     # 教师缓存是否包含 8 头 logits。False 时训练端自动把 lambda_head 路置零（valid_head=0），
     # 不会 KeyError；缓存工具侧由 OPD_STORE_HEADS 控制，两边必须一致。
     store_heads: bool = True

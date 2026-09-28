@@ -46,6 +46,31 @@ _EPDMS_COMFORT_W = (5.0, 5.0, 2.0, 2.0)
 _EPDMS_COMFORT_W_SUM = sum(_EPDMS_COMFORT_W)   # 14，即论文式 (4-7) 的 W^net
 
 
+def safety_gate_scores(head_out: Dict[str, torch.Tensor], scores: torch.Tensor,
+                       gate_ratio: float) -> torch.Tensor:
+    """安全门后处理：把「预测安全乘积远低于本场景最优」的候选置 `-inf` 后再选。
+
+    EPDMS 的安全项是**四项二值指标的乘积**——任一失效即整分为 0。网络输出的是各项的
+    概率估计，连乘得到的 `P(safe)` 是软量：一个 `P(safe)=0.9` 的候选在软分数下仍可能
+    靠舒适度胜出，而它的真实 EPDMS 有一成概率归零。实测 OPD 的差距几乎全在
+    `zero_pct`（选中轨迹违反安全约束的场景占比 15.71%，而对照最好只有 9.89%），
+    每 1 个百分点的 `zero_pct` 约值 0.9 EPDMS 分——所以这里用一个**相对**硬门把它压下来。
+
+    只按场景内的相对阈值判（`gate_ratio × max_i P(safe)_i`），不设绝对阈值：
+    难场景里全体候选都可能违规，绝对阈值会退化；相对阈值在那种场景下自动放宽为
+    「保留相对最安全的那些」，不会出现空候选集。
+
+    `gate_ratio <= 0` 时原样返回（默认关闭，保证既有 ckpt 逐位可复现）。
+    """
+    if gate_ratio is None or gate_ratio <= 0.0:
+        return scores
+    psafe = torch.ones_like(scores)
+    for k in _SAFE_HEAD_KEYS:
+        psafe = psafe * head_out[k].sigmoid()
+    thr = psafe.max(dim=1, keepdim=True).values * float(gate_ratio)
+    return scores.masked_fill(psafe < thr, float('-inf'))
+
+
 def fused_coarse_score(head_out: Dict[str, torch.Tensor], config: HydraConfigAug, *,
                        safe: bool, dual_stream: bool = False) -> torch.Tensor:
     """把 9 个打分头的输出融合成粗筛分数 `[B, vocab_size]`。
@@ -76,8 +101,10 @@ def fused_coarse_score(head_out: Dict[str, torch.Tensor], config: HydraConfigAug
         # 式 (4-8) 组合层：叠加模仿先验。beta 刻意取小值（默认 0.02，与基线 imi 系数同值，
         # 使「双流 vs 基线」的唯一变量是结构而非先验强弱）：imi 是「人类通常会怎么做」的
         # 统计先验，安全硬指标是「物理与规则允许怎么做」的可行域约束，冲突时后者必须主导。
-        return (safe_stream + comfort_stream
-                + float(config.opd.beta_imi) * F.log_softmax(head_out['imi'], dim=-1))
+        # 缺 imi 头时该项退化为跨候选常量，不影响 argmax（精排头的 imi 是可选输出）。
+        imi_term = (float(config.opd.beta_imi) * F.log_softmax(head_out['imi'], dim=-1)
+                    if 'imi' in head_out else 0.0)
+        return safe_stream + comfort_stream + imi_term
     if safe:
         import torch.nn.functional as F
         ttc = F.logsigmoid(head_out['time_to_collision_within_bound'])
@@ -637,7 +664,18 @@ class TrajOffsetHead(nn.Module):
 
             last_layer_result = layer_results[-1]
             refinement_metrics = self._config.lab.refinement_metrics
-            if refinement_metrics == 'all':
+            _ref_opd_cfg = getattr(self._config, 'opd', None)
+            _ref_dual = (bool(getattr(_ref_opd_cfg, 'dual_stream_score', False))
+                         if _ref_opd_cfg is not None else False)
+            if _ref_dual:
+                # 创新点 1 贯穿粗筛与精排两级：精排的最终选择分数与粗筛共用同一条 EPDMS 同构准则。
+                # 这一步是必需的——`use_first_stage_traj_in_infer=false` 时评测轨迹取自精排的
+                # argmax（见本函数末尾 `final_traj`），若精排仍用旧的加性加权式，双流准则就只
+                # 影响到 top-K 候选集而进不了最终选择。
+                # `use_offset_refinement` 下精排头输出的是「粗筛逐头 logit + offset」的残差修正，
+                # 所以这里对修正后的逐头 logits 直接施加式 (4-6)~(4-8)。
+                scores = fused_coarse_score(last_layer_result, self._config, safe=True, dual_stream=True)
+            elif refinement_metrics == 'all':
                 if self._config.lab.adjust_refinement_score_weight:
                     revised_times = 3.0
                 else:
@@ -650,7 +688,7 @@ class TrajOffsetHead(nn.Module):
                         6.0 * (5.0 * last_layer_result['time_to_collision_within_bound'].sigmoid() +
                                revised_times * 5.0 * last_layer_result['ego_progress'].sigmoid() +
                                revised_times * 2.0 * last_layer_result['lane_keeping'].sigmoid() +
-                               1.0 * last_layer_result['history_comfort'].sigmoid()
+                               2.0 * last_layer_result['history_comfort'].sigmoid()
                                ).log()
                 )
             elif refinement_metrics == 'dac_ep_lk':
@@ -670,7 +708,9 @@ class TrajOffsetHead(nn.Module):
                                 2.0 * last_layer_result['lane_keeping'].sigmoid()
                         ).log()
                 )
-            if self._config.lab.use_imi_learning_in_refinement:
+            # 双流分支里 `fused_coarse_score` 已经含 `beta_imi · log_softmax(imi)`，
+            # 这里不能再加一次（旧分支才有这个独立项）。
+            if not _ref_dual and self._config.lab.use_imi_learning_in_refinement:
                 scores += 0.02 * last_layer_result['imi'].softmax(-1).log()
             if self._config.lab.optimize_prev_frame_traj_for_ec:
                 scores += 0.008 * last_layer_result['imi_prev'].softmax(-1).log()
@@ -694,7 +734,13 @@ class TrajOffsetHead(nn.Module):
                 refinement_dict.append(_next_layer_dict)
 
             else:
-                select_indices = scores.argmax(1)
+                # 安全门后处理（`opd.safety_gate_ratio`，默认 0 关闭）：EPDMS 的安全项是四项
+                # 二值指标的乘积，软分数下「预测安全 0.9 + 舒适高」的候选仍可能胜出，而它有一成
+                # 概率整分归零。这里在**最终选择**处按场景内相对阈值硬性排除明显更不安全的候选。
+                # 只作用于选择，不改 `scores` 本身（后者仍原样导出，保持与蒸馏目标一致）。
+                _ref_gate = (float(getattr(_ref_opd_cfg, 'safety_gate_ratio', 0.0))
+                             if _ref_opd_cfg is not None else 0.0)
+                select_indices = safety_gate_scores(last_layer_result, scores, _ref_gate).argmax(1)
                 batch_indices = torch.arange(B, device=select_indices.device)
                 final_traj = refinement_dict[-1]['trajs'][batch_indices, select_indices]
         refinement_dict[-1]['scores'] = scores
