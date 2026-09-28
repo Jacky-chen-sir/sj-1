@@ -1,0 +1,15 @@
+method,step,split,n_valid,epdms,nc,dac,ddc,tl,ep,ttc,lk,hc,ec,zero_pct,csv
+opd,5000,same_iter,11992,74.0,96.86,95.23,98.98,99.6,84.75,96.6,94.06,97.9,71.26,16.54,evals/opd/step5000.csv
+opd,9000,same_iter,11992,75.62,97.07,95.61,99.07,99.6,87.39,96.97,94.62,98.29,77.17,16.29,evals/opd/step9000.csv
+opd,13000,same_iter,11992,76.5,97.48,95.78,98.99,99.64,88.59,97.16,94.74,98.31,78.0,15.71,evals/opd/step13000.csv
+drivesuprim_r34_hf,full,NOT_same_iter_8gpu,11992,77.22,97.34,96.56,99.37,99.57,88.97,97.19,95.55,98.33,77.03,15.19,evals/ref/drivesuprim_r34_hf.csv
+gtrs_aug_vov_standalone,official_ckpt,NOT_same_iter_vov,11992,79.02,98.56,98.88,99.44,99.87,85.69,98.56,94.84,98.3,70.28,11.47,evals/ref/gtrs_aug_vov_standalone.csv
+official_gtrs_r34,5000,same_iter,11992,70.48,97.02,92.69,97.95,99.70,80.44,96.70,91.08,98.22,57.64,17.95,evals/official_gtrs_r34/step5000.csv
+official_gtrs_r34,9000,same_iter,11992,74.93,97.99,94.17,99.07,99.62,84.68,97.87,93.85,98.28,72.51,15.89,evals/official_gtrs_r34/step9000.csv
+official_gtrs_r34,13000,same_iter,11992,76.61,97.97,96.56,99.16,99.62,84.05,97.86,93.96,98.26,71.21,13.60,evals/official_gtrs_r34/step13000.csv
+official_recipe_r34,5000,same_iter,,,,,,,,,,,,,evals/official_recipe/step5000.csv
+official_recipe_r34,9000,same_iter,,,,,,,,,,,,,evals/official_recipe/step9000.csv
+official_recipe_r34,13000,same_iter,,,,,,,,,,,,,evals/official_recipe/step13000.csv
+official_drivesuprim_r34,5000,same_iter,11990,71.24,93.54,90.97,97.09,99.45,81.17,91.88,91.33,98.16,59.01,17.60,evals/official_drivesuprim_r34/step5000.csv
+official_drivesuprim_r34,9000,same_iter,11990,78.58,96.86,94.49,99.25,99.57,83.25,95.66,93.69,98.30,71.20,11.30,evals/official_drivesuprim_r34/step9000.csv
+official_drivesuprim_r34,13000,same_iter,11990,80.69,97.51,95.35,99.13,99.66,84.91,96.42,94.54,98.34,74.14,9.89,evals/official_drivesuprim_r34/step13000.csv

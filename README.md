@@ -11,3 +11,7 @@ Same-iter R34 ablation compared these two recipes (shared LR/BS/accum/13000 step
 
 Branch: `sj-opd-bases` on https://github.com/Jacky-chen-sir/sj-1
 OPD-only evolving branch: `sj-opd`
+
+## Launch commands
+
+See **`launch/COMMANDS.md`** and scripts under **`launch/ablation_same_iter_r34/`**.
