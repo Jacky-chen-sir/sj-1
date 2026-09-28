@@ -51,13 +51,16 @@ def sync_drivesuprim_config_aliases(config: "HydraConfigAug") -> "HydraConfigAug
     if config.opd is not None and config.opd.enable:
         assert config.opd.teacher_mode in ("offline", "ema", "none"), (
             f"opd.teacher_mode 只能是 offline/ema/none，收到 {config.opd.teacher_mode!r}")
+        assert config.opd.lambda_decay in ("none", "cosine"), (
+            f"opd.lambda_decay 只能是 none/cosine，收到 {config.opd.lambda_decay!r}")
         if config.opd.teacher_mode == "offline":
-            # 离线蒸馏与原在线软标签教师互斥：离线教师不存在，
-            # 若仍开着 compute_loss_soft_teacher 会对 teacher_pred=None 下标直接崩。
-            config.lab.ban_soft_label_loss = True
-            # 离线训练 ckpt 没有 teacher.*，若 inference 还指向 teacher，eval 会静默
-            # 用随机初始化的 teacher 输出垃圾分数。强制 student（B3）。
-            config.inference.model = "student"
+            has_ema = bool(config.opd.ema_eval or config.opd.ema_soft_label)
+            # 软标签需要进程内 EMA 教师；没有它时 compute_loss_soft_teacher 会对 teacher_pred=None 下标崩。
+            config.lab.ban_soft_label_loss = not bool(config.opd.ema_soft_label)
+            if not has_ema:
+                # 无 EMA 副本的 ckpt 没有 teacher.*，若 inference 还指向 teacher，eval 会静默
+                # 用随机初始化的 teacher 输出垃圾分数。强制 student。
+                config.inference.model = "student"
             # fused_coarse_score 的非 safe 分支走 `softmax(-1).log()` / `sigmoid().log()`，
             # 词表里必然存在被压到下溢的条目 → -inf。蒸馏要对这个张量做 gather/log_softmax，
             # -inf 会经 `0 * -inf` 变 NaN（valid=0 的样本尤其）。OPD 下必须走 safe 版。
@@ -77,9 +80,12 @@ def sync_drivesuprim_config_aliases(config: "HydraConfigAug") -> "HydraConfigAug
             config.opd.teacher_score_dir = None
             config.opd.teacher_onpolicy_score_dir = None
             config.lab.ban_soft_label_loss = False
-        else:  # "none"：纯学生基线，但走与 OPD 完全相同的代码路径（λ=0 的同路径对照）
+        else:  # "none"：去掉 ViT-L 蒸馏、其余（EMA 软标签/EMA 评测/硬拷贝期）与 OPD 完全同配置的对照
             config.opd.teacher_score_dir = None
             config.opd.teacher_onpolicy_score_dir = None
+            config.lab.ban_soft_label_loss = not bool(config.opd.ema_soft_label)
+            if not (config.opd.ema_eval or config.opd.ema_soft_label):
+                config.inference.model = "student"
     return config
 
 
@@ -214,8 +220,9 @@ class LabConfig:
 class OPDConfig:
     """OPD 离线蒸馏（论文第 4 章）。
 
-    教师 = 冻结的 ViT-L，离线打分、per-token 缓存；学生 = R34，训练时教师完全不前向。
-    teacher_mode='offline' 时由 sync_drivesuprim_config_aliases 强制关掉在线软标签教师。
+    教师 = 冻结的 ViT-L，离线打分、per-token 缓存；学生 = R34，训练时 ViT-L 完全不前向。
+    offline 模式下默认仍保留一份学生的 EMA 副本（ema_eval / ema_soft_label），
+    关掉这两个开关即退化为纯离线蒸馏（此时 sync 强制 ban_soft_label_loss + inference=student）。
     """
     enable: bool = False
     teacher_mode: str = "offline"          # offline | ema | none   (ema = 复现原行为，作消融对照)
@@ -251,6 +258,25 @@ class OPDConfig:
     # 不能配 predictions[0]（原视图）。collect 脚本把 dθ 写进 offline_aug_file 的 view 0，
     # 对应学生 predictions[1]。缓存 payload 里的 view_idx 会与这个值做一致性断言。
     on_policy_view_idx: int = 1
+
+    # —— 学生权重 EMA（offline 模式下也保留一份与学生同构的 EMA 副本）——
+    # 官方配方评测的是 EMA 教师（inference.model=teacher），纯 offline 评测的是裸学生：
+    # epoch≥3 后 EMA 的权重平均加成只有 base 吃得到，师生对比不同口径。
+    # ema_eval：建 EMA 副本并默认评测它（不增加前向，只是每步一次权重滑动平均）。
+    ema_eval: bool = True
+    # ema_soft_label：同时恢复原配方的在线软标签损失（EMA 教师在原视图上的限幅软目标）。
+    # 与离线 ViT-L 蒸馏互补：前者前期强（冻结强教师），后者后期强（随学生共同进化的集成）。
+    # 代价：每步多一次 R34 无梯度前向（即原配方的开销）。
+    ema_soft_label: bool = True
+    # R34 原配方前 3 个 epoch m=0（EMA=学生硬拷贝）。OPD 的学生在 ViT-L 监督下 1 个 epoch
+    # 就已进入可用区间，EMA 可以更早开始集成；非 ResNet 骨干的原配方本来就从 epoch 0 起 m=0.992。
+    ema_hardcopy_epochs: int = 1
+
+    # —— 蒸馏权重调度 ——
+    # 教师在它自己的训练集上的输出 ≈ 标签本身，蒸馏的边际价值随学生逼近教师而递减；
+    # 前期保持全权重吃冷启动红利，后期衰减到 lambda_final_ratio，把学生交还给 GT + 软标签。
+    lambda_decay: str = "cosine"           # none | cosine（按 optimizer step 计）
+    lambda_final_ratio: float = 0.3
 
 
 @dataclass

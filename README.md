@@ -108,7 +108,8 @@ CKPT=/path/to.ckpt GPU=0 BS=8 WORKERS=8 bash scripts/evaluation/eval_drivesuprim
 ## 6. OPD 蒸馏（第 4 章）
 
 教师 = 冻结 ViT-L（87.1），**离线打分、训练时完全不前向**；学生 = R34，三路蒸馏损失
-（imi 分布 KL + 8 头逐轨迹二元 KL + 融合分数 listwise/召回）。与上面 §3 的 AUG 训练互斥（`ban_soft_label_loss` 已强制）。
+（imi 分布 KL + 8 头逐轨迹二元 KL + 融合分数 listwise/召回）。默认是**混合配方**：在 ViT-L 蒸馏之外保留
+AUG 原配方的 EMA 软标签、评测 EMA 权重（与官方 base 同口径）、EMA 硬拷贝期 3→1 epoch、蒸馏总权重 cosine 衰减到 0.3。
 
 ### 三步跑法（远程 3×3090）
 
@@ -123,7 +124,8 @@ NPROC=3 bash scripts/opd/training/cache_teacher.sh
 OPD_TEACHER_SCORE_DIR=$OPD_TEACHER_SCORE_DIR \
 bash scripts/opd/training/train_opd.sh gtrs_aug_opd_r34 1 3 256
 
-# 3) 评估（按文件名 glob ckpt，不再算 step=epoch*1330）
+# 3) 评估（按文件名 glob ckpt，不再算 step=epoch*1330）。默认评 EMA 权重；
+#    INFER_MODEL=student 评原始权重（本次改动前训的纯离线 ckpt 没有 EMA 副本，只能用 student）
 bash scripts/opd/evaluation/eval_opd.sh 5 \
   training/opd/gtrs_aug_opd_r34/rot_30-p_0.5/stage_layers_3-topks_256 1 3 256
 ```
@@ -139,7 +141,11 @@ bash scripts/opd/evaluation/eval_opd.sh 5 \
 | `OPD_ON_POLICY_ROUNDS / _WEIGHT` | 0 / 0.5 | on-policy 轮数与权重（0=关） |
 | `OPD_ON_POLICY_VIEW_IDX` | 1 | on-policy 缓存配对的学生视图下标；与缓存 `view_idx` 双向断言 |
 | `OPD_STORE_HEADS` | 1 | 教师缓存是否含 8 头 logits；**须与 `cache_teacher.sh` 一致**，为 0 时 `lambda_head` 自动置零 |
-| `OPD_TEACHER_MODE` | offline | `offline`（读缓存）/ `ema`（原在线软标签教师，消融对照）/ `none`（同路径纯学生基线） |
+| `OPD_TEACHER_MODE` | offline | `offline`（读缓存）/ `ema`（原在线软标签教师，消融对照）/ `none`（去掉 ViT-L 蒸馏、其余同配置的基线） |
+| `OPD_EMA_EVAL` | true | 保留学生的 EMA 副本，评测时用它（`inference.model=teacher`） |
+| `OPD_EMA_SOFT_LABEL` | true | 在 ViT-L 蒸馏之外叠加原配方的 EMA 软标签损失 |
+| `OPD_EMA_HARDCOPY_EPOCHS` | 1 | EMA 前 N 个 epoch 动量 m=0（硬拷贝）；原配方 3 |
+| `OPD_LAMBDA_DECAY / _FINAL_RATIO` | cosine / 0.3 | 蒸馏总权重按 optimizer step 调度（`none` = 常数）；日志 `train/opd_lambda_scale` |
 | `BS` / `NPROC` / `ACCUM` | 3 / 3 / 4 | 有效批量 = 三者乘积；LR 自动线性缩放（基线 7.5e-5 @ 64） |
 | `PRECISION` | 32 | **必须 32**；`sync_batchnorm` 已开 |
 
@@ -148,10 +154,10 @@ bash scripts/opd/evaluation/eval_opd.sh 5 \
 ```bash
 # 全量；或 DRY_RUN=1 先看命令
 bash scripts/opd/ablation/sweep_opd.sh
-GROUPS="default im_only tau_imi_1 rounds_1" bash scripts/opd/ablation/sweep_opd.sh
+SWEEP_GROUPS="default im_only tau_imi_1 rounds_1" bash scripts/opd/ablation/sweep_opd.sh
 ```
 
-组名见 `scripts/opd/ablation/sweep_opd.sh` 顶部注释（λ 独立性 / τ / λ 组合 / on-policy 轮数 / EMA 对照）。
+组名见 `scripts/opd/ablation/sweep_opd.sh`（混合配方拆解 pure_offline/no_decay/ema_eval_only/hardcopy_3 / λ 独立性 / τ / λ 组合 / on-policy 轮数 / EMA 对照）。
 词表规模消融（4096/16384）需重算 PDM 分数与教师缓存，不在 sweep 里做。
 
 

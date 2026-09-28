@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 import os
 from typing import Dict, Tuple
 
@@ -91,6 +92,10 @@ class AgentLightningModuleAug(pl.LightningModule):
             loss_opd, loss_opd_dict = self.agent.compute_loss_distill(features, targets, student_preds, tokens)
             for k, v in loss_opd_dict.items():
                 self.log(f"{logging_prefix}/{k}-opd", v, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
+            # λ 调度作用在四路合计上（details 里仍是未缩放的原值，便于跨 step 比较）
+            lam_scale = self._opd_lambda_scale()
+            loss_opd = loss_opd * lam_scale
+            self.log(f"{logging_prefix}/opd_lambda_scale", lam_scale, on_step=True, on_epoch=False, sync_dist=False)
             self.log(f"{logging_prefix}/loss-opd", loss_opd, on_step=True, on_epoch=True, prog_bar=True,
                      sync_dist=True)
             loss = loss + loss_opd
@@ -129,6 +134,21 @@ class AgentLightningModuleAug(pl.LightningModule):
     def on_train_start(self):
         self.agent.model.train()
 
+    def _opd_lambda_scale(self) -> float:
+        """蒸馏总权重的调度因子：cosine 从 1 衰减到 lambda_final_ratio（按 optimizer step）。"""
+        opd = self._cfg.opd
+        if opd.lambda_decay == 'none':
+            return 1.0
+        try:
+            total = int(self.trainer.estimated_stepping_batches)
+        except Exception:  # trainer 未挂载（单测 / 纯前向）时不调度
+            return 1.0
+        if total <= 0 or total == float('inf'):
+            return 1.0
+        p = min(1.0, max(0.0, self.global_step / total))
+        r = float(opd.lambda_final_ratio)
+        return r + (1.0 - r) * 0.5 * (1.0 + math.cos(math.pi * p))
+
     def optimizer_step(
             self,
             epoch: int,
@@ -144,12 +164,13 @@ class AgentLightningModuleAug(pl.LightningModule):
         #     m = self.momentum_schedule[epoch]
 
         if self._cfg.backbone_type in ('resnet34', 'resnet50'):
-            if epoch < 3:
+            # 原配方：前 3 个 epoch m=0（硬拷贝），之后 0.992 起每 epoch +0.002，封顶 0.998。
+            # OPD yaml 下（所有 teacher_mode 共用，保证消融只差蒸馏信号）硬拷贝期可缩短。
+            hard = int(self._cfg.opd.ema_hardcopy_epochs) if self._cfg.opd.enable else 3
+            if epoch < hard:
                 m = 0
-            elif epoch < 6:
-                m = 0.992 + (epoch - 3) * 0.002
             else:
-                m = 0.998
+                m = min(0.992 + (epoch - hard) * 0.002, 0.998)
         else:
             if epoch < 3:
                 m = 0.992 + epoch * 0.002

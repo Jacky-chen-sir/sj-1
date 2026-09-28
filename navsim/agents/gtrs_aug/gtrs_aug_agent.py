@@ -150,16 +150,14 @@ class GTRSAugAgent(AbstractAgent):
         self._lr = lr
         self.metrics = metrics
         self._checkpoint_path = checkpoint_path
-        # OPD 离线蒸馏：训练时不建教师、不跑教师、不做 EMA，teacher_model=None。
-        # teacher_mode='ema' 才复现原在线软标签教师（消融对照）。
+        # OPD 离线蒸馏：ViT-L 教师不进训练进程（读离线缓存）。进程内的 "teacher" 槽位只放学生的
+        # 同构 EMA 副本，且仅在 opd.ema_eval / opd.ema_soft_label 任一打开时才建；
+        # 两者都关 = 纯离线蒸馏，teacher_model=None、不做 EMA。
         opd = getattr(config, 'opd', None)
         opd_offline = opd is not None and opd.enable and opd.teacher_mode == 'offline'
-        if opd_offline:
-            teacher_model = None
-            student_model = HydraModel(config)
-        else:
-            teacher_model = HydraModel(config)
-            student_model = HydraModel(config)
+        need_teacher = (not opd_offline) or bool(opd.ema_eval or opd.ema_soft_label)
+        teacher_model = HydraModel(config) if need_teacher else None
+        student_model = HydraModel(config)
         self._opd_offline = opd_offline
         self.model = AugMetaArch(config, teacher_model, student_model)
         self.vocab_size = config.vocab_size
@@ -303,11 +301,15 @@ class GTRSAugAgent(AbstractAgent):
         )
         teacher_missing = [k for k in missing if k.startswith("model.teacher.")]
         if teacher_missing and self._config.inference.model == "teacher":
+            # 典型场景：关掉 EMA 训出来的纯离线 OPD ckpt（没有 teacher.*）拿默认 teacher 口径去评。
+            # 用随机初始化的教师打分只会产出垃圾分数，这里回退到学生并大声告警。
+            # self._config 与 AugMetaArch.cfg 是同一个对象，改这里 forward 即时生效。
             logger.warning(
-                "加载的 ckpt 缺少 %d 个 teacher.* 参数，但 inference.model='teacher'——"
-                "将用随机初始化的教师打分，分数不可信；请改用 inference.model=student 或加载完整 ckpt",
+                "加载的 ckpt 缺少 %d 个 teacher.* 参数（无 EMA 副本），inference.model='teacher' 无法成立；"
+                "已回退为 student 评测——实验目录名里的 '-teacher' 此时名不副实，请用 INFER_MODEL=student 重评",
                 len(teacher_missing),
             )
+            self._config.inference.model = "student"
         if student_missing or unexpected:
             logger.info("initialize: unexpected_keys=%s", unexpected[:8])
 

@@ -4,7 +4,7 @@
 #
 # 用法：
 #   bash scripts/opd/ablation/sweep_opd.sh            # 全量
-#   GROUPS="default tau_imi_1" bash scripts/opd/ablation/sweep_opd.sh   # 只跑指定组
+#   SWEEP_GROUPS="default tau_imi_1" bash scripts/opd/ablation/sweep_opd.sh   # 只跑指定组
 #   DRY_RUN=1 bash scripts/opd/ablation/sweep_opd.sh   # 只打命令不跑
 #
 # 词表规模消融（4096/16384）不在此处：换词表要重算 PDM 分数缓存 + 教师缓存 + 词表 npy，
@@ -38,12 +38,15 @@ run_group() {
   echo
 }
 
-want() { case " ${GROUPS} " in *" $1 "*) return 0;; *) return 1;; esac; }
+want() { case " ${SWEEP_GROUPS} " in *" $1 "*) return 0;; *) return 1;; esac; }
 
 # 先跑 `none lam_02 default lam_20` 这 4 组：它们标定蒸馏总权重的量级。
 # 四路 λ 默认合计 3.5，而 KL 项内部还乘了 τ²=4，加在 O(1) 的学生基础损失上——
 # 蒸馏很可能盖过主损失、把学生拉向教师的错误。没有这条标定曲线，其余格子的差异读不出来。
-GROUPS=${GROUPS:-"none lam_02 default lam_20 \
+# 注意：不能叫 GROUPS——那是 bash 内置只读数组（当前用户 gid 列表），赋值无效/报错，
+# 会导致一组都匹配不上。
+SWEEP_GROUPS=${SWEEP_GROUPS:-"pure_offline no_decay ema_eval_only hardcopy_3 \
+none lam_02 default lam_20 \
 im_only head_only refine_only recall_only \
 tau_imi_1 tau_imi_4 tau_head_1 tau_head_4 tau_list_1 tau_list_4 \
 no_head no_recall emis_recall_1 topk_refine_32 topk_refine_1024 \
@@ -51,12 +54,21 @@ rounds_0 rounds_1 rounds_2 ema"}
 
 echo "=== OPD sweep ==="
 echo "  teacher_score_dir: $TEACHER_SCORE_DIR"
-echo "  groups           : $GROUPS"
+echo "  groups           : $SWEEP_GROUPS"
 echo "  agent            : $MAIN_AGENT  stages=$NUM_REFINE/$STAGE_LAYERS/$TOPKS"
 echo
 
-# —— 蒸馏总权重标定（先跑这 4 组）——
-# none = 走完全相同的代码路径但不读教师缓存，是"同路径基线"，比换 agent 的基线可比性强
+# —— 混合配方拆解（先跑这 4 组 + default + none）——
+# default      = 混合配方：ViT-L 蒸馏 + EMA 软标签 + EMA 评测 + 硬拷贝 1 epoch + λ cosine→0.3
+# pure_offline = 改动前的配方（纯 ViT-L 蒸馏、无 EMA、无软标签、λ 常数）——对照上界提升来自哪
+# none         = default 去掉 ViT-L 蒸馏（≈官方 base + 硬拷贝 1 epoch）——隔离蒸馏本身的贡献
+want pure_offline   && run_group "pure_offline"  OPD_EMA_EVAL=false OPD_EMA_SOFT_LABEL=false OPD_LAMBDA_DECAY=none
+want no_decay       && run_group "no_decay"      OPD_LAMBDA_DECAY=none
+want ema_eval_only  && run_group "ema_eval_only" OPD_EMA_SOFT_LABEL=false
+want hardcopy_3     && run_group "hardcopy_3"    OPD_EMA_HARDCOPY_EPOCHS=3
+
+# —— 蒸馏总权重标定 ——
+# none = 走完全相同的代码路径但不读教师缓存（EMA/软标签配置与 default 相同），是"同路径基线"
 want none           && run_group "none"          OPD_TEACHER_MODE=none
 want lam_02         && run_group "lam_02"        OPD_LAMBDA_IMI=0.2 OPD_LAMBDA_HEAD=0.2 OPD_LAMBDA_REFINE=0.2 OPD_LAMBDA_RECALL=0.1
 want default        && run_group "default"

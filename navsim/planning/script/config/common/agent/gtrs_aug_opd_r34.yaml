@@ -1,5 +1,7 @@
 # OPD 蒸馏学生（ResNet34）；教师=冻结 ViT-L（87.1）离线打分。
-# 与 gtrs_aug_drivesuprim_r34.yaml 同一基座，只加 opd: 段并关掉在线软标签教师。
+# 与 gtrs_aug_drivesuprim_r34.yaml 同一基座，加 opd: 段。默认是"混合"配方：
+# ViT-L 离线蒸馏 + 保留原配方的 EMA 软标签 + 评测 EMA 权重 + λ cosine 衰减。
+# 回到纯离线蒸馏（无 EMA、无软标签）：opd.ema_eval=false opd.ema_soft_label=false opd.lambda_decay=none。
 # opd: 块必须写全 _target_，否则 CLI 的 ++agent.config.opd.* 会把 opd 变成普通 dict、
 # 之后 config.opd.tau 属性访问必崩（sync_drivesuprim_config_aliases 里有强制 coercion保护）。
 _target_: navsim.agents.gtrs_aug.gtrs_aug_agent.GTRSAugAgent
@@ -105,7 +107,7 @@ config:
 
   inference:
     _target_: navsim.agents.gtrs_aug.hydra_config_aug.InferConfig
-    model: student            # OPD 离线蒸馏没有 in-process teacher；sync 里也会强制 student
+    model: teacher            # 评测 EMA 权重（与官方 base 口径一致）；ema_eval/ema_soft_label 都关时 sync 强制 student
     use_aug: true
     use_first_stage_traj_in_infer: false
     save_pickle: false
@@ -120,7 +122,7 @@ config:
     use_imi_learning_in_refinement: true
     adjust_refinement_loss_weight: false
     adjust_refinement_score_weight: false
-    ban_soft_label_loss: true
+    ban_soft_label_loss: false   # 由 sync 按 opd.ema_soft_label 覆盖
     optimize_prev_frame_traj_for_ec: false
     refinement_metrics: 'all'
     use_higher_res_feat_in_refinement: false
@@ -152,6 +154,16 @@ config:
     on_policy_weight: 0.5
     # on-policy 教师缓存配对的学生视图下标（0=原视图，1..=旋转视图）
     on_policy_view_idx: 1
+    # —— 前期/后期都压过 base 的三件套 ——
+    # 保留一份学生的 EMA 副本，评测时用它（base 的 76.61 也是 EMA 权重的分）
+    ema_eval: true
+    # 在 ViT-L 蒸馏之外继续叠加原配方的 EMA 软标签（两路信号互补：外部强教师 + 时间集成）
+    ema_soft_label: true
+    # R34 原配方前 3 个 epoch m=0（EMA=硬拷贝），这里缩到 1，EMA 更早开始起平滑作用
+    ema_hardcopy_epochs: 1
+    # 蒸馏总权重按 optimizer step 做 cosine 衰减：前期强蒸馏拉起点，后期让位给 GT 监督
+    lambda_decay: cosine
+    lambda_final_ratio: 0.3
 
 checkpoint_path: null
 lr: 1e-4

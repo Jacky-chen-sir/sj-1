@@ -77,8 +77,11 @@ class AugMetaArch(nn.Module):
             return teacher_output_dict
 
         if self.cfg.training:
-            # 离线蒸馏：教师分离开进程缓存，训练时不跑教师，teacher_pred=None
-            teacher_pred = get_teacher_output() if self._has_teacher else None
+            # 进程内教师前向只服务两个消费者：在线软标签损失、optimize_prev_frame_traj_for_ec。
+            # 两者都不用时（OPD 只开 ema_eval），EMA 副本只做权重平均，不必每步白跑一次前向。
+            need_teacher_fwd = self._has_teacher and (
+                not self.cfg.lab.ban_soft_label_loss or self.cfg.lab.optimize_prev_frame_traj_for_ec)
+            teacher_pred = get_teacher_output() if need_teacher_fwd else None
         else:
             use_teacher = self.cfg.inference.model == "teacher"
             if use_teacher and not self._has_teacher:

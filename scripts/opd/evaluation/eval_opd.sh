@@ -1,7 +1,9 @@
 #!/bin/bash
 # OPD 蒸馏学生评估。与 eval_epoch.sh 的三点区别：
 #   1. 按文件名 glob ckpt，不算 step=$((epoch*1330)) —— NPROC=3 时 step 数不对，1330 是 8GPU×BS8 的步数。
-#   2. inference.model 固定 student（OPD 没有 in-process teacher）。
+#   2. inference.model 默认 teacher（= 学生的 EMA 副本，与官方 base 的评测口径一致）。
+#      无 EMA 副本的旧 ckpt（ema_eval/ema_soft_label 都关、或本次改动前训的）用 INFER_MODEL=student；
+#      即使忘了传，agent.initialize() 发现 ckpt 无 teacher.* 也会大声 warn 并回落 student。
 #   3. BS 默认 4（按显存预算），不沿用 8。
 #
 # 用法：
@@ -15,8 +17,8 @@ num_refinement_stage=${3:-1}
 stage_layers=${4:-3}
 topks=${5:-256}
 agent=${6:-gtrs_aug_opd_r34}
-# OPD 学生没有 in-process teacher；这里直接写死 student，不再接受第 7 个位置参数。
-inference_model=student
+# teacher = EMA 副本；student = 原始权重。两个都评一次可以直接看出 EMA 的增益。
+inference_model=${INFER_MODEL:-teacher}
 
 padded_epoch=$(printf "%02d" "$epoch")
 metric_cache_path="${NAVSIM_EXP_ROOT}/metric_cache/test/ori"

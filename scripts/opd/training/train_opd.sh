@@ -13,6 +13,10 @@
 #   OPD_ON_POLICY_ROUNDS / OPD_ON_POLICY_WEIGHT  on-policy（默认 0）
 #   OPD_STORE_HEADS                               教师缓存是否含 8 头 logits（须与 cache_teacher.sh 一致）
 #   OPD_ON_POLICY_VIEW_IDX                        on-policy 缓存配对的学生视图下标（默认 1）
+#   OPD_TEACHER_MODE                              offline | ema | none（默认 offline）
+#   OPD_EMA_EVAL / OPD_EMA_SOFT_LABEL             保留 EMA 副本并评测它 / 叠加 EMA 软标签（默认 true/true）
+#   OPD_EMA_HARDCOPY_EPOCHS                       EMA 前几个 epoch m=0 硬拷贝（默认 1；原配方 3）
+#   OPD_LAMBDA_DECAY / OPD_LAMBDA_FINAL_RATIO     蒸馏总权重调度 none|cosine、终值比例（默认 cosine / 0.3）
 #
 # 通用旋钮：
 #   BS（每卡 batch，默认 3）  NPROC（默认 3）  ACCUM（梯度累积，默认 4）
@@ -78,6 +82,11 @@ if [ -n "${OPD_ON_POLICY_WEIGHT:-}" ];         then opd_over+=( "++agent.config.
 if [ -n "${OPD_STORE_HEADS:-}" ];              then opd_over+=( "++agent.config.opd.store_heads=${OPD_STORE_HEADS}" ); fi
 if [ -n "${OPD_ON_POLICY_VIEW_IDX:-}" ];       then opd_over+=( "++agent.config.opd.on_policy_view_idx=${OPD_ON_POLICY_VIEW_IDX}" ); fi
 if [ -n "${OPD_TEACHER_MODE:-}" ];             then opd_over+=( "++agent.config.opd.teacher_mode=${OPD_TEACHER_MODE}" ); fi
+if [ -n "${OPD_EMA_EVAL:-}" ];                 then opd_over+=( "++agent.config.opd.ema_eval=${OPD_EMA_EVAL}" ); fi
+if [ -n "${OPD_EMA_SOFT_LABEL:-}" ];           then opd_over+=( "++agent.config.opd.ema_soft_label=${OPD_EMA_SOFT_LABEL}" ); fi
+if [ -n "${OPD_EMA_HARDCOPY_EPOCHS:-}" ];      then opd_over+=( "++agent.config.opd.ema_hardcopy_epochs=${OPD_EMA_HARDCOPY_EPOCHS}" ); fi
+if [ -n "${OPD_LAMBDA_DECAY:-}" ];             then opd_over+=( "++agent.config.opd.lambda_decay=${OPD_LAMBDA_DECAY}" ); fi
+if [ -n "${OPD_LAMBDA_FINAL_RATIO:-}" ];       then opd_over+=( "++agent.config.opd.lambda_final_ratio=${OPD_LAMBDA_FINAL_RATIO}" ); fi
 
 command_string="$NAVSIM_DEVKIT_ROOT/navsim/planning/script/run_training_aug.py \
     +debug=false \
