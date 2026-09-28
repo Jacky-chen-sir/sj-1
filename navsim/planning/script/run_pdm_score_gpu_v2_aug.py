@@ -208,6 +208,34 @@ def run_pdm_score_wo_inference(args: List[Dict[str, Union[List[str], DictConfig]
     return pdm_results
 
 
+_PER_TOKEN_META_COLS = ("log_name", "frame_type", "start_time", "endpoint_x",
+                        "endpoint_y", "start_point_x", "start_point_y")
+
+
+def _dump_per_token_scores(pdm_score_df: pd.DataFrame, raw_pdm_score_df: pd.DataFrame,
+                           save_path: Path) -> None:
+    """逐 token 的最终分数 + 场景元信息落盘，供事后分析（分桶 / bootstrap / 显著性检验）。
+
+    最终聚合把 log_name / frame_type 等元信息丢掉了，而原始 raw 表又还没注入两帧扩展舒适度，
+    因此没有"带最终 score 且带元信息"的表。两者按 token 左连接补出来。
+    """
+    keep = ["token"] + [c for c in _PER_TOKEN_META_COLS if c in raw_pdm_score_df.columns]
+    raw = raw_pdm_score_df[keep].drop_duplicates(subset=["token"], keep="first")
+
+    token_df = pdm_score_df.copy()
+    is_summary = token_df["token"].isin(
+        ["extended_pdm_score_combined", "extended_pdm_score_stage_one",
+         "extended_pdm_score_stage_two", "average_all_frames"])
+    token_df = token_df[~is_summary]
+    # 元信息列若已在最终表里（当前实现会 drop 掉，这里防御性处理），以最终表为准
+    raw = raw.drop(columns=[c for c in raw.columns if c != "token" and c in token_df.columns])
+
+    merged = token_df.merge(raw, on="token", how="left")
+    out = save_path / "per_token.csv"
+    merged.to_csv(out, index=False)
+    logger.info(f"Per-token scores ({len(merged)} rows) written to: {out}")
+
+
 @hydra.main(config_path=CONFIG_PATH, config_name=CONFIG_NAME, version_base=None)
 def main(cfg: DictConfig) -> None:
     """
@@ -367,6 +395,11 @@ def main(cfg: DictConfig) -> None:
     timestamp = datetime.now().strftime("%Y.%m.%d.%H.%M.%S")
     csv_path = save_path / f"{timestamp}.csv"
     pdm_score_df.to_csv(csv_path)
+
+    try:
+        _dump_per_token_scores(pdm_score_df, raw_pdm_score_df, save_path)
+    except Exception:
+        logger.exception("Failed to write per_token.csv; continuing.")
 
     final_score_rows = pdm_score_df[pdm_score_df["token"] == "extended_pdm_score_combined"]
     final_score = final_score_rows["score"].iloc[0] if not final_score_rows.empty else np.nan
