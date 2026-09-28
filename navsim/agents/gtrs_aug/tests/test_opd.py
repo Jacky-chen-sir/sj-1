@@ -264,6 +264,110 @@ def test_recall_floor_at_uniform():
     assert abs(d['distill_recall'].item() - expected) < 1e-3, (d['distill_recall'].item(), expected)
 
 
+SAFE_HEADS = ['no_at_fault_collisions', 'drivable_area_compliance',
+              'driving_direction_compliance', 'traffic_light_compliance']
+
+
+def test_distill_prod_zero_when_heads_match_and_positive_when_one_safe_head_flips():
+    """式 (4-23)：师生逐头相同 → 乘积一致性损失为 0；只翻一个安全头 → 严格为正。"""
+    opd = _import_loss()
+    cfg = _cfg(lambda_prod=1.0)
+    preds = _student_preds(with_head_grad=False)
+    preds['coarse_fused_score'] = torch.randn(B, V)
+    cache = _teacher_cache(cfg, match_student=preds)
+    _, d_match = opd(preds, cache, cfg)
+    assert d_match['distill_prod'].abs() < 1e-6, d_match['distill_prod']
+
+    # 只把「闯红灯」这一个安全头的教师 logit 大幅拉低，其余全同 → 乘积失配
+    cache['traffic_light_compliance'] = cache['traffic_light_compliance'].clone()
+    cache['traffic_light_compliance'][:, :] -= 8.0
+    _, d_flip = opd(preds, cache, cfg)
+    assert d_flip['distill_prod'] > 1e-3, d_flip['distill_prod']
+
+
+def test_lambda_prod_zero_is_bitwise_noop_on_total():
+    """默认路径回归守卫：λ_prod=0 时总损失与不含该项逐位相同（新增项默认不改变训练行为）。"""
+    opd = _import_loss()
+    cfg = _cfg(lambda_prod=0.0)
+    preds = _student_preds(with_head_grad=False)
+    preds['coarse_fused_score'] = torch.randn(B, V)
+    cache = _teacher_cache(cfg)
+    total, d = opd(preds, cache, cfg)
+    manual = (cfg.opd.lambda_imi * d['distill_imi']
+              + cfg.opd.lambda_head * d['distill_head']
+              + cfg.opd.lambda_refine * d['distill_refine']
+              + cfg.opd.lambda_recall * d['distill_recall'])
+    assert torch.equal(total, manual), (total.item(), manual.item())
+
+
+def test_head_scope_safe_supervises_four_heads_only():
+    """head_scope='safe' 只蒸四项乘性安全头；'all' 覆盖全部八项。"""
+    opd = _import_loss()
+    preds = _student_preds(with_head_grad=False)
+    preds['coarse_fused_score'] = torch.randn(B, V)
+
+    cfg_all = _cfg(head_scope='all')
+    _, d_all = opd(preds, _teacher_cache(cfg_all), cfg_all)
+    cfg_safe = _cfg(head_scope='safe')
+    cache_safe = _teacher_cache(cfg_safe)
+    _, d_safe = opd(preds, cache_safe, cfg_safe)
+
+    # safe 作用域 == 手算的四项加权和
+    w = cfg_safe.trajectory_pdm_weight
+    manual = torch.zeros(B)
+    for m in SAFE_HEADS:
+        t_logit = cache_safe[m].float() / cfg_safe.opd.tau_head
+        s_logit = preds[m].float() / cfg_safe.opd.tau_head
+        bce = F.binary_cross_entropy_with_logits(s_logit, torch.sigmoid(t_logit), reduction='none')
+        manual = manual + bce.mean(-1) * (cfg_safe.opd.tau_head ** 2) * float(w.get(m, 1.0))
+    assert torch.allclose(d_safe['distill_head'], manual.mean(), rtol=1e-5), (
+        d_safe['distill_head'], manual.mean())
+    # 作用域不同 → 值不同（八项里多出的四项贡献非零）
+    assert not torch.allclose(d_all['distill_head'], d_safe['distill_head'], rtol=1e-6)
+
+
+def test_dual_stream_fusion_is_log_epdms_and_penalizes_zero_safe_head():
+    """创新点 1 的机理断言（纯数值，不依赖教师）：
+
+    - 双流融合 = log(安全项乘积 · 舒适项加权平均 / W) + β·log p^imi，与手算一致；
+    - 构造一个安全头归零（σ→0）的候选，其双流分数应显著低于安全头全 1 的候选——
+      这是「安全是乘性硬约束」的核心，基线式 (4-5) 的加性形式做不到。
+    """
+    from navsim.agents.gtrs_aug.hydra_model import fused_coarse_score
+    cfg = _cfg(dual_stream_score=True)
+    cfg.opd.beta_imi = 0.0                      # 隔离 imi 先验，只看八项
+    head_out = {m: torch.full((1, V), 6.0) for m in METRICS}   # σ(6)≈0.9975，接近 1
+    head_out['imi'] = torch.zeros(1, V)
+
+    dual = fused_coarse_score(head_out, cfg, safe=True, dual_stream=True)
+
+    # 手算：Σ_mul logσ + log((Σ_add w·σ)/14)
+    w_add = [5.0, 5.0, 2.0, 2.0]
+    add_heads = ['time_to_collision_within_bound', 'ego_progress',
+                 'lane_keeping', 'history_comfort']
+    safe_log = sum(torch.logsigmoid(head_out[m]) for m in SAFE_HEADS)
+    comfort = sum(wi * head_out[m].sigmoid() for wi, m in zip(w_add, add_heads)) / 14.0
+    manual = safe_log + comfort.clamp_min(1e-6).log()
+    assert torch.allclose(dual, manual, atol=1e-5), (dual[0, :3], manual[0, :3])
+
+    # 安全头归零的候选：双流分数必须显著低于安全头全 1 的候选
+    bad = {k: v.clone() for k, v in head_out.items()}
+    bad['no_at_fault_collisions'] = torch.full((1, V), -30.0)
+    dual_bad = fused_coarse_score(bad, cfg, safe=True, dual_stream=True)
+    assert (dual[0, 0] - dual_bad[0, 0]).item() > 10.0, (dual[0, 0].item(), dual_bad[0, 0].item())
+
+
+def test_dual_stream_default_off_matches_baseline_branch():
+    """dual_stream=False 时融合分数与既有 safe 分支逐位相同（默认路径零回归）。"""
+    from navsim.agents.gtrs_aug.hydra_model import fused_coarse_score
+    cfg = _cfg(dual_stream_score=False)
+    head_out = {m: torch.randn(2, V) for m in METRICS}
+    head_out['imi'] = torch.randn(2, V)
+    a = fused_coarse_score(head_out, cfg, safe=True)
+    b = fused_coarse_score(head_out, cfg, safe=True, dual_stream=False)
+    assert torch.equal(a, b)
+
+
 if __name__ == '__main__':
     import sys
     sys.exit(pytest.main([__file__, '-q']))

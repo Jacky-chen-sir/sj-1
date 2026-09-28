@@ -69,7 +69,8 @@ class OPDCaptureModule(AgentLightningModuleAug):
     """只做前向、per-token 原子写盘；返回 None（return_predictions=False 忽略返回值）。"""
 
     def __init__(self, cfg, agent, out_dir: str, vocab_sha1: str, offline_aug_sha1: str, store_heads: bool,
-                 safe_fused_score: bool, teacher_ckpt: str = '', view_idx: int = 0):
+                 safe_fused_score: bool, teacher_ckpt: str = '', view_idx: int = 0,
+                 dual_stream_score: bool = False):
         super().__init__(cfg=cfg, agent=agent)
         self._teacher_ckpt = teacher_ckpt
         self._out_dir = out_dir
@@ -77,6 +78,7 @@ class OPDCaptureModule(AgentLightningModuleAug):
         self._offline_aug_sha1 = offline_aug_sha1
         self._store_heads = store_heads
         self._safe_fused_score = safe_fused_score
+        self._dual_stream_score = dual_stream_score
         self._view_idx = view_idx
 
     def predict_step(self, batch: Tuple[Dict, Dict, list], batch_idx: int):
@@ -118,6 +120,9 @@ class OPDCaptureModule(AgentLightningModuleAug):
                 'teacher_ckpt': self._teacher_ckpt,
                 # 训练端据此断言师生两侧用的是同一条融合分数公式
                 'safe_fused_score': bool(self._safe_fused_score),
+                # 创新点 1 的双流式 (4-6)~(4-8) 同样改融合分数：缓存必须与训练端开关一致，
+                # 否则 topk_idx / coarse 是另一条公式下的产物，训练端一致性断言会硬报错。
+                'dual_stream_score': bool(self._dual_stream_score),
                 'store_heads': bool(self._store_heads),
                 'view_idx': int(self._view_idx),
             }
@@ -182,14 +187,17 @@ def main(cfg: DictConfig) -> None:
     assert safe_fused_score, (
         "教师缓存必须带 agent.config.opd.safe_fused_score=true（见 cache_teacher.sh）；"
         "否则落盘的 coarse 含 -inf，训练端 log_softmax 后整 batch NaN")
+    # 创新点 1：双流式也改融合分数，缓存端与训练端必须同开关（payload 记录该值供训练端断言）。
+    dual_stream_score = bool(cfg.agent.config.opd.dual_stream_score)
     logger.info(f"vocab_sha1={vocab_sha1} offline_aug_sha1={offline_aug_sha1} "
-                f"store_heads={store_heads} safe_fused_score={safe_fused_score} view_idx={view_idx}")
+                f"store_heads={store_heads} safe_fused_score={safe_fused_score} "
+                f"dual_stream_score={dual_stream_score} view_idx={view_idx}")
 
     module = OPDCaptureModule(cfg=cfg.agent.config, agent=agent, out_dir=out_dir,
                               vocab_sha1=vocab_sha1, offline_aug_sha1=offline_aug_sha1,
                               store_heads=store_heads, safe_fused_score=safe_fused_score,
                               teacher_ckpt=str(cfg.agent.get('checkpoint_path', '') or ''),
-                              view_idx=view_idx)
+                              view_idx=view_idx, dual_stream_score=dual_stream_score)
 
     # 每个 rank 先各建一次目录（exist_ok 吞并发 FileExistsError），再 barrier 对齐后开跑
     os.makedirs(out_dir, exist_ok=True)

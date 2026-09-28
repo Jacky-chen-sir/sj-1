@@ -275,28 +275,37 @@ _PDM_HEADS = (
     'traffic_light_compliance', 'history_comfort',
 )
 
+# 四项乘性（合取）安全头，论文式 (4-22) / (4-23) 的作用域。
+# 必须与 `hydra_model._SAFE_HEAD_KEYS` 一致；不直接 import 是为了避免 loss 模块反向依赖模型模块。
+_SAFE_HEAD_KEYS = (
+    'no_at_fault_collisions', 'drivable_area_compliance',
+    'driving_direction_compliance', 'traffic_light_compliance',
+)
+
 
 def opd_distill_loss(student_pred: Dict[str, torch.Tensor], teacher_cache: Dict[str, torch.Tensor],
                      config: HydraConfigAug):
-    """OPD 三路蒸馏，返回 (total, dict)。
+    """OPD 蒸馏，返回 (total, dict)。
 
-    三路全部可独立置零（对应消融的 λ 独立性与 on/off 开关）：
+    每一路都可独立置零（对应消融的 λ 独立性与 on/off 开关）：
       1. imi 分布蒸馏：`KL(softmax(s_imi/τ_imi) ‖ softmax(t_imi/τ_imi)) · τ_imi²`
-      2. 8 头逐轨迹二元 KL：`KL(Bern(σ(t/τ_h)) ‖ Bern(σ(s/τ_h)))`，逐元素按 trajectory_pdm_weight 加权
+      2. 逐轨迹二元 KL：`KL(Bern(σ(t/τ_h)) ‖ Bern(σ(s/τ_h)))`，逐元素按 trajectory_pdm_weight 加权。
+         遍历范围由 `opd.head_scope` 决定：'all'（默认）= 八项可预测指标，
+         'safe' = 只蒸四项乘性安全头（论文式 (4-22) 的原始写法）。
       3. 精排 listwise（教师 Top-K 子集上的融合分数）+ 召回集合监督（教师 Top-K' 内部的 logsumexp）
+      4. 乘积一致性约束（论文式 (4-23)，创新点 2）：对四项安全因子的**乘积**整体施加监督。
+         第 2 路逐项独立，保证不了乘积；而乘积恰是 EPDMS 安全项的全部内容。
 
     约定（与教师缓存 `run_teacher_opd_cache.py` 对齐）：
       - teacher_cache['valid']: [B] float，0=该 token 的缓存缺失/损坏。乘 0 而非跳过分支，
         否则 DDP static_graph 会因某 step 少走一条 loss 分支而 RuntimeError。
       - teacher_cache['valid_head']: [B] float，0=该 token 的缓存不含 8 头 logits
-        （`OPD_STORE_HEADS=0`）。第 2 路按这个 mask 置零，其余两路不受影响。
+        （`OPD_STORE_HEADS=0`）。第 2、4 路按这个 mask 置零，其余路不受影响。
       - teacher_cache['coarse']: [B, V] 数值安全融合分数（必须是 safe 版；非 safe 版含 -inf）。
       - teacher_cache['imi'] / 8 个 per-head 键：[B, V] 原始 logits（**顶层逐头键**，
         不是一个堆叠数组——落盘端 `run_teacher_opd_cache.py` 必须与此一致）。
       - 全部内部 `.float()`，杜绝 16-mixed 未来把 log_softmax/logsumexp 掉精度。
     """
-    from navsim.agents.gtrs_aug.hydra_model import fused_coarse_score
-
     opd = config.opd
     device = student_pred['imi'].device
     valid = teacher_cache['valid'].float().to(device).view(-1)          # [B]
@@ -320,10 +329,14 @@ def opd_distill_loss(student_pred: Dict[str, torch.Tensor], teacher_cache: Dict[
     loss_imi = F.kl_div(s_log_imi, t_log_imi, reduction='none', log_target=True).sum(-1) * (opd.tau_imi ** 2)
     out['distill_imi'] = masked_mean(loss_imi)
 
-    # ---------- 2. 8 个 PDM 头逐轨迹二元 KL（等价 F.binary_cross_entropy_with_logits(t_logit, σ(s))），logsigmoid 安全化 ----------
+    # ---------- 2. PDM 头逐轨迹二元 KL（等价 F.binary_cross_entropy_with_logits(t_logit, σ(s))），logsigmoid 安全化 ----------
+    # 遍历范围由 head_scope 决定：'all' = 八项可预测指标（默认，现有行为）；
+    # 'safe' = 只蒸四项乘性安全头，对应论文式 (4-22) 的原始写法。
+    head_scope = str(getattr(opd, 'head_scope', 'all'))
+    scope_heads = _SAFE_HEAD_KEYS if head_scope == 'safe' else _PDM_HEADS
     loss_head = torch.zeros(student_pred['imi'].shape[0], device=device)
     w = config.trajectory_pdm_weight
-    for name in _PDM_HEADS:
+    for name in scope_heads:
         t_logit = teacher_cache[name].float().to(device) / opd.tau_head   # 教师 logit，当 soft 目标温度
         s_logit = student_pred[name].float() / opd.tau_head
         # BCE-with-soft-target(s_logit, σ(t_logit)) * τ² 即逐轨迹 Bernoulli KL 的原值
@@ -332,6 +345,15 @@ def opd_distill_loss(student_pred: Dict[str, torch.Tensor], teacher_cache: Dict[
         loss_head = loss_head + kl
         out[f'distill_head_{name}'] = masked_mean_head(kl)
     out['distill_head'] = masked_mean_head(loss_head)
+
+    # ---------- 2b. 乘积一致性约束（论文式 (4-23)，创新点 2）----------
+    # 第 2 路逐项独立，每一项都对不代表**乘积**对；而乘积恰是 EPDMS 安全项的全部内容。
+    # 在 log 空间度量乘积的一致性：连乘的比值取对数后变成差，各因子贡献可加、可比较，
+    # 同时避免连乘在 fp32 下溢。abs 在 0 点用次梯度（PyTorch 取 0），不影响收敛。
+    s_safe_log = sum(F.logsigmoid(student_pred[k].float()) for k in _SAFE_HEAD_KEYS)   # [B,V]
+    t_safe_log = sum(F.logsigmoid(teacher_cache[k].float().to(device)) for k in _SAFE_HEAD_KEYS)
+    loss_prod = (s_safe_log - t_safe_log).abs()                                        # [B,V]
+    out['distill_prod'] = masked_mean_head(loss_prod.mean(-1))
 
     # ---------- 3a. 精排 listwise：教师 Top-K 子集上、师生双方都用粗筛融合分数做 listwise ----------
     # （不练精排头：学生精排分数的索引空间是它自己的 top-K，与教师 topk_idx 对不齐，见评审 7.3）
@@ -362,7 +384,8 @@ def opd_distill_loss(student_pred: Dict[str, torch.Tensor], teacher_cache: Dict[
     total = (opd.lambda_imi * out['distill_imi']
              + opd.lambda_head * out['distill_head']
              + opd.lambda_refine * out['distill_refine']
-             + opd.lambda_recall * out['distill_recall'])
+             + opd.lambda_recall * out['distill_recall']
+             + float(getattr(opd, 'lambda_prod', 0.0)) * out['distill_prod'])
     total = total + 0.0 * student_fused.sum()  # 保持计算图连通（valid 全 0 时 DDP static_graph 不报错）
     out['loss_opd'] = total
     return total, out

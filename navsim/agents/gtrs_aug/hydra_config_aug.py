@@ -258,6 +258,14 @@ class OPDConfig:
     lambda_refine: float = 1.0             # 精排 listwise（教师 Top-K 子集上的融合分数）
     lambda_recall: float = 0.5             # 召回集合监督（教师 Top-K' 质量不低于阈值）
 
+    # 论文式 (4-23) 乘积一致性约束（创新点 2）：对四项乘性安全因子的**乘积**整体施加监督。
+    # 逐项 KL（lambda_head）只保证每一项，保证不了乘积——而乘积恰是 EPDMS 安全项的全部内容。
+    # **默认 0.0**：新增项默认不改变既有训练行为，由 sweep 显式打开。
+    lambda_prod: float = 0.0
+    # lambda_head 的遍历范围。'all' = 八项可预测指标（现有行为）；'safe' = 只蒸四项乘性安全头，
+    # 对应论文式 (4-22) 的原始写法，作为消融格。
+    head_scope: str = "all"
+
     topk_refine: int = 256                 # 精排 listwise 的 Top-K（≤ 教师缓存落盘的 topk，超出会被截断）
     topk_recall: int = 32                  # 召回集合监督的 Top-K
 
@@ -266,6 +274,14 @@ class OPDConfig:
     # 默认 True 会静默改掉既有 ckpt 的融合分数公式（safe 版与原版不 bit-wise 相等）。
     # OPD offline 下由 sync_drivesuprim_config_aliases 强制置 True。
     safe_fused_score: bool = False
+    # 论文式 (4-6)~(4-8) 对数空间双流评分头（创新点 1）。True 时 `fused_coarse_score` 走
+    # log EPDMS 等价式：安全流无权重对数求和 + 舒适流 1/W^net 归一化 + beta_imi*log p^imi。
+    # **默认 False**（同上：opd 永不为 None，会落到所有 agent 的 eval），保证既有 ckpt 可复现。
+    # 注意：教师缓存 payload 会记录该值，训练端做一致性断言——师生融合式不一致时硬报错。
+    dual_stream_score: bool = False
+    # 式 (4-8) 的 β。默认 0.02，与基线 `fused_coarse_score` 里 imi 项的系数同值，
+    # 使「双流 vs 基线」的唯一变量是结构而不是 imi 先验的强弱。
+    beta_imi: float = 0.02
     # 教师缓存是否包含 8 头 logits。False 时训练端自动把 lambda_head 路置零（valid_head=0），
     # 不会 KeyError；缓存工具侧由 OPD_STORE_HEADS 控制，两边必须一致。
     store_heads: bool = True

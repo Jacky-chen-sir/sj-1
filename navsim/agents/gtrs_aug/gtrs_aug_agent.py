@@ -47,7 +47,8 @@ _OPD_REQUIRED_KEYS = ('imi', 'coarse', 'topk_idx')
 
 def _ops_teacher_to_tensors(items: List[Optional[Dict[str, Any]]], device,
                             vocab_size: int, topk: int,
-                            expect_safe_fused: bool = True) -> Dict[str, torch.Tensor]:
+                            expect_safe_fused: bool = True,
+                            expect_dual_stream: Optional[bool] = None) -> Dict[str, torch.Tensor]:
     """把 per-token 教师缓存列表堆成本 batch 的张量字典。
 
     - `valid` [B]：该 token 的必需键是否齐全。缺失样本以零张量占位，损失端乘 0。
@@ -77,6 +78,16 @@ def _ops_teacher_to_tensors(items: List[Optional[Dict[str, Any]]], device,
         assert bool(ref['safe_fused_score']), (
             "教师缓存是用 opd.safe_fused_score=false 生成的（coarse 含 -inf），"
             "与训练端强制的 safe 版融合分数公式不一致；必须用 safe=true 重跑缓存")
+
+    # 创新点 1：缓存里的 coarse / topk_idx 是在某一融合式下算出来的。师生开关不一致时
+    # 缓存里的候选集与分数就是另一条公式的产物，训练会静默学到错的东西——硬报错而不是降级。
+    # `expect_dual_stream=None` 表示调用方不做这项检查（老缓存没有这个键时也不该报错）。
+    if ref is not None and expect_dual_stream is not None and 'dual_stream_score' in ref:
+        assert bool(ref['dual_stream_score']) == bool(expect_dual_stream), (
+            f"教师缓存的融合式与训练端不一致：缓存 dual_stream_score="
+            f"{bool(ref['dual_stream_score'])}，训练端 opd.dual_stream_score={bool(expect_dual_stream)}。"
+            "两者必须同开关，否则 coarse/topk_idx 来自另一条公式；用匹配的开关重跑缓存，"
+            "或把训练端 opd.dual_stream_score 改成与缓存一致")
 
     def stack(key, dtype, shape, valid_flags):
         vals = []
@@ -461,6 +472,7 @@ class GTRSAugAgent(AbstractAgent):
                 items, device=predictions[0]['imi'].device,
                 vocab_size=int(self._config.vocab_size),
                 topk=int(cfg_opd.topk_refine),
+                expect_dual_stream=bool(getattr(cfg_opd, 'dual_stream_score', False)),
             )
 
         # 原视图蒸馏：教师缓存的 view_idx 必须是 0（原视图），配 predictions[0]

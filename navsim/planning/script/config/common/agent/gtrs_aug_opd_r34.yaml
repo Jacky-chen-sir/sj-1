@@ -147,6 +147,16 @@ config:
     topk_refine: 256
     topk_recall: 32
     safe_fused_score: true
+    # —— 论文式 (4-6)~(4-8) 对数空间双流评分头（创新点 1）——
+    # eval 不读 train_opd.sh 的 OPD_* 透传，只读本文件，所以四个新开关必须在这里显式落值。
+    # dual_stream_score 默认关：打开会改掉融合分数公式，教师缓存 payload 会记录该值，
+    # 训练端做一致性断言（师生融合式不一致时硬报错，不静默降级）。
+    dual_stream_score: false
+    beta_imi: 0.02
+    # —— 论文式 (4-23) 乘积一致性约束（创新点 2），默认关，由 sweep 显式打开 ——
+    lambda_prod: 0.0
+    # lambda_head 的遍历范围：'all' = 八项可预测指标；'safe' = 只蒸四项乘性安全头
+    head_scope: all
     # 必须与缓存时的 OPD_STORE_HEADS 一致（cache_teacher.sh 默认 1）。
     # 为 false 时 lambda_head 那一路被自动置零。
     store_heads: true

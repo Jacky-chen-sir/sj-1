@@ -50,7 +50,8 @@ none lam_02 default lam_20 \
 im_only head_only refine_only recall_only \
 tau_imi_1 tau_imi_4 tau_head_1 tau_head_4 tau_list_1 tau_list_4 \
 no_head no_recall emis_recall_1 topk_refine_32 topk_refine_1024 \
-rounds_0 rounds_1 rounds_2 ema"}
+rounds_0 rounds_1 rounds_2 ema \
+dual_stream prod_05 prod_10 head_scope_safe dual_stream_prod"}
 
 echo "=== OPD sweep ==="
 echo "  teacher_score_dir: $TEACHER_SCORE_DIR"
@@ -94,5 +95,18 @@ want rounds_0       && run_group "rounds_0"      OPD_ON_POLICY_ROUNDS=0
 want rounds_1       && run_group "rounds_1"      OPD_ON_POLICY_ROUNDS=1
 want rounds_2       && run_group "rounds_2"      OPD_ON_POLICY_ROUNDS=2
 want ema            && run_group "ema"           OPD_TEACHER_MODE=ema
+
+# —— 第 4 章创新点 1/2（论文 §4.4.6 消融清单）——
+# 顺序有讲究：先各跑单独一格，两格都非负再合成完整配置。
+# dual_stream   = 创新点 1：融合式换成 log EPDMS 等价的双流式 (4-6)~(4-8)
+# prod_*        = 创新点 2：乘积一致性约束式 (4-23)，λ_prod 待标定
+# head_scope_safe = 式 (4-22) 的原始写法（只蒸四项乘性安全头），对照默认的八项口径
+# 注意 dual_stream 会改融合分数，必须与教师缓存 payload 里的 dual_stream_score 一致，
+# 否则训练端一致性断言会硬报错——跑前先确认缓存是用同一开关生成的。
+want dual_stream    && run_group "dual_stream"      OPD_DUAL_STREAM_SCORE=true
+want prod_05        && run_group "prod_05"          OPD_LAMBDA_PROD=0.5
+want prod_10        && run_group "prod_10"          OPD_LAMBDA_PROD=1.0
+want head_scope_safe && run_group "head_scope_safe" OPD_HEAD_SCOPE=safe
+want dual_stream_prod && run_group "dual_stream_prod" OPD_DUAL_STREAM_SCORE=true OPD_LAMBDA_PROD=0.5
 
 echo "=== sweep done ==="

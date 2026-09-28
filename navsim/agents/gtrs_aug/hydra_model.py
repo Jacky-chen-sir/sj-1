@@ -29,21 +29,62 @@ from sklearn.cluster import KMeans
 from navsim.agents.utils.attn import MemoryEffTransformer
 
 
-def fused_coarse_score(head_out: Dict[str, torch.Tensor], config: HydraConfigAug, *, safe: bool) -> torch.Tensor:
+# —— 论文第 4 章：EPDMS 指标结构（表 4-1）——
+# 四项乘性（合取）安全指标、四项加性（析取）舒适指标，以及舒适组的 EPDMS 聚合权重。
+# 注意 `_EPDMS_COMFORT_W` 是**评测指标**的聚合权重（TTC 5 / EP 5 / LK 2 / HC 2，Σ=14），
+# 与 `HydraConfigAug.trajectory_pdm_weight`（损失加权 ttc 4 / ep 2 / lk 2 / hc 1）是两回事，
+# 不要混用。下面的非双流分支里同名的字面量必须与这里保持一致。
+_SAFE_HEAD_KEYS = (
+    'no_at_fault_collisions', 'drivable_area_compliance',
+    'driving_direction_compliance', 'traffic_light_compliance',
+)
+_COMFORT_HEAD_KEYS = (
+    'time_to_collision_within_bound', 'ego_progress',
+    'lane_keeping', 'history_comfort',
+)
+_EPDMS_COMFORT_W = (5.0, 5.0, 2.0, 2.0)
+_EPDMS_COMFORT_W_SUM = sum(_EPDMS_COMFORT_W)   # 14，即论文式 (4-7) 的 W^net
+
+
+def fused_coarse_score(head_out: Dict[str, torch.Tensor], config: HydraConfigAug, *,
+                       safe: bool, dual_stream: bool = False) -> torch.Tensor:
     """把 9 个打分头的输出融合成粗筛分数 `[B, vocab_size]`。
 
-    由 `HydraTrajHead.forward` 原 :295-306 的内联表达式抽取，保证位级一致的复现性。
-    - `safe=False`：逐字符复刻原式（`softmax.log()` / `sigmoid().log()`），eval 基线数字不变。
+    三个分支互斥，优先级 dual_stream > safe > 原式。
+    - `dual_stream=True`：论文式 (4-6)~(4-8) 的对数空间双流评分头，在八项可预测指标上
+      等价于 `log EPDMS`。数值上恒走安全原语，无历史 ckpt 包袱。
     - `safe=True`：数值安全版（`log_softmax` / `logsigmoid` / 内层 `clamp_min`），
       供 OPD 蒸馏的 KL 使用，避免 fp32 下溢产生 `-inf` → `0 * (-inf) = NaN`。
+    - 默认（两者皆 False）：逐字符复刻 `HydraTrajHead.forward` 原 :295-306 的内联表达式。
+
+    两个既有分支里的舒适组 HC 权重由 1.0 改为 2.0，与 EPDMS 评测口径
+    （`pdm_scorer.py` 的 `history_comfort_weight`）及论文式 (4-7) 的 W^net=14 对齐。
+    这一改动会改变既有 ckpt 的 eval 数字——是有意的，原值 1.0 使网络与评测在舒适组
+    权重上不同构。
     """
+    if dual_stream:
+        import torch.nn.functional as F
+        # 式 (4-6) 安全流：四项乘性指标的无权重对数求和（合取）。
+        # 无权重是刻意的——EPDMS 的乘性部分对四项一视同仁，任一项归零即总分归零；
+        # 基线给 TL 0.1 / NC 0.5 的差别待遇会让网络以为闯红灯比碰撞轻。
+        safe_stream = sum(F.logsigmoid(head_out[k]) for k in _SAFE_HEAD_KEYS)
+        # 式 (4-7) 舒适流：四项加性指标按 EPDMS 权重归一化后取对数（析取）。
+        # 1/W^net 归一化替代基线的手工常数 gamma=6.0，使该项与评测口径一致。
+        comfort_sum = sum(w * head_out[k].sigmoid()
+                          for k, w in zip(_COMFORT_HEAD_KEYS, _EPDMS_COMFORT_W))
+        comfort_stream = (comfort_sum / _EPDMS_COMFORT_W_SUM).clamp_min(1e-6).log()
+        # 式 (4-8) 组合层：叠加模仿先验。beta 刻意取小值（默认 0.02，与基线 imi 系数同值，
+        # 使「双流 vs 基线」的唯一变量是结构而非先验强弱）：imi 是「人类通常会怎么做」的
+        # 统计先验，安全硬指标是「物理与规则允许怎么做」的可行域约束，冲突时后者必须主导。
+        return (safe_stream + comfort_stream
+                + float(config.opd.beta_imi) * F.log_softmax(head_out['imi'], dim=-1))
     if safe:
         import torch.nn.functional as F
         ttc = F.logsigmoid(head_out['time_to_collision_within_bound'])
         ep = F.logsigmoid(head_out['ego_progress'])
         lk = F.logsigmoid(head_out['lane_keeping'])
         comfort = F.logsigmoid(head_out['history_comfort'])
-        inner = (5.0 * ttc.exp() + 5.0 * ep.exp() + 2.0 * lk.exp() + 1.0 * comfort.exp()).clamp_min(1e-6).log()
+        inner = (5.0 * ttc.exp() + 5.0 * ep.exp() + 2.0 * lk.exp() + 2.0 * comfort.exp()).clamp_min(1e-6).log()
         return (
             0.02 * F.log_softmax(head_out['imi'], dim=-1)
             + 0.1 * F.logsigmoid(head_out['traffic_light_compliance'])
@@ -61,7 +102,7 @@ def fused_coarse_score(head_out: Dict[str, torch.Tensor], config: HydraConfigAug
         + 6.0 * (5.0 * head_out['time_to_collision_within_bound'].sigmoid()
                  + 5.0 * head_out['ego_progress'].sigmoid()
                  + 2.0 * head_out['lane_keeping'].sigmoid()
-                 + 1.0 * head_out['history_comfort'].sigmoid()
+                 + 2.0 * head_out['history_comfort'].sigmoid()
                  ).log()
     )
 
@@ -330,8 +371,11 @@ class HydraTrajHead(nn.Module):
             result[k] = head(dist_status).squeeze(-1)
 
         # safe 默认 False：保证既有 ckpt 的 eval 数字 bit-wise 不变；OPD 训练时置 True 走数值安全版。
-        _safe = bool(self._config.opd.safe_fused_score) if getattr(self._config, 'opd', None) is not None else False
-        scores = fused_coarse_score(result, self._config, safe=_safe)
+        # dual_stream 同样默认 False，True 时走论文式 (4-6)~(4-8) 的双流头（优先级高于 safe）。
+        _opd_cfg = getattr(self._config, 'opd', None)
+        _safe = bool(_opd_cfg.safe_fused_score) if _opd_cfg is not None else False
+        _dual = bool(_opd_cfg.dual_stream_score) if _opd_cfg is not None else False
+        scores = fused_coarse_score(result, self._config, safe=_safe, dual_stream=_dual)
 
         selected_indices = scores.argmax(1)
         scene_cnt_tensor = torch.arange(B, device=scores.device)
