@@ -98,10 +98,15 @@ def run_pdm_score_wo_inference(args: List[Dict[str, Union[List[str], DictConfig]
     pdm_results: List[pd.DataFrame] = []
 
     # first stage
-
+    # 原实现第一阶段固定用 IDM reactive；DriveSuprim 的 run_pdm_score_one_stage_gpu_ssl.py 按
+    # cfg.traffic_agents（default_common.yaml 默认 non_reactive = log replay）选。两者分数不可比。
+    # STAGE1_TRAFFIC_AGENTS=non_reactive 与 DriveSuprim 口径对齐；默认 reactive 保持历史数字不变。
+    stage_one_policy = os.getenv('STAGE1_TRAFFIC_AGENTS', 'reactive')
+    assert stage_one_policy in ('reactive', 'non_reactive'), stage_one_policy
     traffic_agents_policy_stage_one: AbstractTrafficAgentsPolicy = instantiate(
-        cfg.traffic_agents_policy.reactive, simulator.proposal_sampling
+        cfg.traffic_agents_policy[stage_one_policy], simulator.proposal_sampling
     )
+    logger.info(f"Stage one traffic agents policy: {stage_one_policy}")
 
     scene_loader_tokens_stage_one = scene_loader.tokens_stage_one or []
     metric_cache_tokens = metric_cache_loader.tokens or []
