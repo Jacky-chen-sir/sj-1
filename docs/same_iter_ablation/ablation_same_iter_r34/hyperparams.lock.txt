@@ -1,0 +1,54 @@
+# Locked to the OPD run that produced step 5000/9000/13000 scores.
+# Source: exp/training/opd/.../2026.09.14.11.14.19/code/hydra/overrides.yaml
+# Official-recipe job MUST copy these. Method-only diffs are listed at the bottom.
+
+shared:
+  backbone: resnet34
+  lr: 4.219e-05
+  lr_mult_backbone: 1.0
+  batch_size_per_gpu: 3
+  nproc: 3
+  accumulate_grad_batches: 4
+  sync_batchnorm: true
+  effective_batch: 36
+  precision: 32
+  max_epochs: 10
+  seed: 0
+  gradient_clip_val: 0.0
+  split: navtrain
+  vocab: test_8192_kmeans.npy (8192)
+  camera: 2048 x 512
+  img_anchors: 16 x 64
+  sigma: 0.5
+  trajectory_imi_weight: 1.0
+  progress_weight: 2.0
+  student_rotation_ensemble: 3
+  rot: 30
+  p: 0.5
+  refinement: transformer_decoder / 1 stage / layers=3 / topks=256
+  use_offset_refinement: true
+  use_separate_stage_heads: true
+  use_imi_learning_in_refinement: true
+  dataloader_num_workers: 4
+  pin_memory: true
+  DDP_FIND_UNUSED: 1
+
+method_only_diffs:
+  official_drivesuprim_r34:
+    repo: DriveSuprim-main
+    agent: drivesuprim_agent_r34
+    in_process_ema_teacher: true
+    inference.model: teacher
+    ban_soft_label_loss: false
+  opd:
+    repo: GTRS_official
+    agent: gtrs_aug_opd_r34
+    in_process_ema_teacher: false
+    inference.model: student
+    ban_soft_label_loss: true
+    opd.enable: true
+    opd.teacher_mode: offline
+    opd.teacher: frozen ViT-L cache
+  eval_dp_if_combined:
+    pickle: exp/train_dp_official_fm_joint/epoch=18-step=81776_navtest_fm.pkl
+    note: our FM-DP; same file for both methods
