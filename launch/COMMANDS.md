@@ -125,6 +125,8 @@ Do **not** run three Ray scorers with `threads_per_node=8` at once (SIGBUS / OOM
 
 ## 3) official_gtrs_r34 (GTRSori EMA soft-label baseline, same lock)
 
+Repo root on this branch = `gtrsori/` (local `GTRSori`). Set `NAVSIM_DEVKIT_ROOT` to that tree.
+
 ```bash
 bash ablation_same_iter_r34/run_official_gtrs_r34.sh
 ```

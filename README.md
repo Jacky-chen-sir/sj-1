@@ -1,17 +1,13 @@
 # sj-opd-bases
 
-Side-by-side snapshots for analyzing OPD vs DriveSuprim/AUG EMA soft-label.
+Side-by-side source trees for the same-iter R34 ablation (3×3090, max_steps=13000).
 
-| dir | source | role |
+| dir | local source | agent / role |
 |---|---|---|
-| `opd/` | local `GTRS_official` @ `sj-opd` | Offline ViT-L distillation (OPD), `gtrs_aug_opd_r34` |
-| `drivesuprim/` | local `DriveSuprim-main` | Official EMA teacher + soft labels (`drivesuprim_agent_r34`) |
+| `opd/` | `GTRS_official` @ `sj-opd` | `gtrs_aug_opd_r34` — offline ViT-L OPD |
+| `drivesuprim/` | `DriveSuprim-main` | `drivesuprim_agent_r34` — EMA teacher + soft labels |
+| `gtrsori/` | `GTRSori` | `gtrs_aug_r34` — official_gtrs_r34 same-iter baseline |
+| `launch/` | ablation scripts + `COMMANDS.md` | train/eval launchers for all three |
 
-Same-iter R34 ablation compared these two recipes (shared LR/BS/accum/13000 steps).
-
-Branch: `sj-opd-bases` on https://github.com/Jacky-chen-sir/sj-1
-OPD-only evolving branch: `sj-opd`
-
-## Launch commands
-
-See **`launch/COMMANDS.md`** and scripts under **`launch/ablation_same_iter_r34/`**.
+Shared lock: `launch/ablation_same_iter_r34/hyperparams.lock.txt`  
+Scores: `launch/ablation_same_iter_r34/scores.csv`
