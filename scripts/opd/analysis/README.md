@@ -26,6 +26,21 @@ cluster bootstrap 都需要它。
 
 ---
 
+## 一键跑完（推荐）
+
+下面各节是分步说明；**跑的时候用总驱动**，它把 表 6（效率）与 表 7（分桶 + 显著性）串成一条链，
+省得漏掉步骤或让两个方法的 `POLICY` 取到不同的值：
+
+```bash
+BASE_PKL=$ABL/evals/opd/base_13k.pkl OURS_PKL=$ABL/evals/opd/opd_13k.pkl \
+  bash scripts/opd/analysis/run_zero_cost_analysis.sh
+```
+
+给了 `TEACHER_CKPT` / `STUDENT_CKPT` 就顺带跑效率表；`DRY_RUN=1` 只打印命令。
+产物：`efficiency.csv`（表 6）、`challenge_subsets.csv` + `bootstrap_ci.csv`（表 7）。
+
+---
+
 ## 0. 前置：环境变量
 
 ```bash
