@@ -41,11 +41,13 @@ logger = logging.getLogger(__name__)
 
 def dp_loss_bev(
         targets: Dict[str, torch.Tensor], predictions: Dict[str, torch.Tensor],
-        config: DPConfig, traj_head
+        config: DPConfig, traj_head, features: Dict[str, torch.Tensor] = None
 ):
     # B, 8 (4 secs, 0.5Hz), 3
     target_traj = targets["trajectory"]
-    dp_loss, dp_extras = traj_head.get_dp_loss(predictions['env_kv'], target_traj.float())
+    # features 仅在开启评价器引导（创新点 A/B）时被 get_dp_loss 使用
+    dp_loss, dp_extras = traj_head.get_dp_loss(
+        predictions['env_kv'], target_traj.float(), features=features)
     bev_semantic_loss = F.cross_entropy(predictions["bev_semantic_map"], targets["bev_semantic_map"].long())
     dp_loss = dp_loss * config.dp_loss_weight
     bev_semantic_loss = bev_semantic_loss * config.bev_loss_weight
@@ -181,7 +183,8 @@ class DPAgent(AbstractAgent):
             predictions: Dict[str, torch.Tensor],
             tokens=None
     ):
-        return dp_loss_bev(targets, predictions, self._config, self.model._trajectory_head)
+        return dp_loss_bev(targets, predictions, self._config, self.model._trajectory_head,
+                           features=features)
 
     def get_optimizers(self) -> Union[Optimizer, Dict[str, Union[Optimizer, LRScheduler]]]:
         # Resume loads weights via Lightning ckpt without calling initialize(); freezing must

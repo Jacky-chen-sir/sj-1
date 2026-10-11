@@ -240,10 +240,13 @@ class DPHead(nn.Module):
     """
 
     def __init__(self, num_poses: int, d_ffn: int, d_model: int, vocab_path: str,
-                 nhead: int, nlayers: int, config: DPConfig = None
+                 nhead: int, nlayers: int, config: DPConfig = None,
+                 guidance=None
                  ):
         super().__init__()
         self.config = config
+        # 创新点 A/B：评价器引导模块（由 DPModel 注入；None 表示关闭）
+        self.guidance = guidance
         self.use_flow_matching = bool(getattr(config, 'use_flow_matching', False))
         self.fm_num_inference_steps = int(getattr(config, 'fm_num_inference_steps', 20))
         self.fm_sigma_min = float(getattr(config, 'fm_sigma_min', 1e-4))
@@ -441,8 +444,18 @@ class DPHead(nn.Module):
 
         return result
 
-    def get_dp_loss(self, kv, gt_trajectory):
-        """Returns (loss, extras). extras: detached scalars for logging only."""
+    def _guidance_weights_any(self) -> bool:
+        """三个引导权重是否至少有一个非零。全零时整块跳过，零额外开销。"""
+        c = self.config
+        return any(float(getattr(c, k, 0.0)) > 0.0 for k in
+                   ('lambda_score', 'lambda_safe_feas', 'lambda_comfort_div'))
+
+    def get_dp_loss(self, kv, gt_trajectory, features=None):
+        """Returns (loss, extras). extras: detached scalars for logging only.
+
+        `features` 仅在开启评价器引导（创新点 A/B）时用到——引导模块需要原始相机与
+        状态输入来跑评分器骨干。不开启时传 None 即可，行为与改动前完全一致。
+        """
         B = kv.shape[0]
         device = kv.device
         gt_trajectory = gt_trajectory.float()
@@ -532,6 +545,69 @@ class DPHead(nn.Module):
                     })
                     if kin_loss is not None:
                         extras['fm_kin_loss'] = kin_loss.detach()
+
+            # ==============================================================
+            # 创新点 A/B：评价器引导的生成（论文 3.4.7 / 3.5.5 节）
+            # --------------------------------------------------------------
+            # A  评分引导   ：用第 4 章可微评分头的分数引导提案偏向高分区
+            # B-1 安全可行性 ：安全项是乘性合取，安全乘积过低的提案在评价阶段必然归零
+            # B-2 舒适多样性 ：舒适项是加性析取，评价器正是在这一维度上作区分
+            # ==============================================================
+            if (self.guidance is not None and features is not None
+                    and self._guidance_weights_any()):
+                g = self.guidance
+                every = max(1, int(getattr(self.config, 'guidance_every_n', 1)))
+                if self._sc_calls % every == 0:
+                    # 只在 t ≥ t_min 时施加：t 很小时 x̂1 仍接近噪声，评分无意义
+                    t_min = float(getattr(self.config, 'guidance_t_min', 0.5))
+                    wt = (t01 >= t_min).float()                      # [B]
+                    if wt.sum() > 0:
+                        n_g = max(1, int(getattr(self.config, 'guidance_samples', 2)))
+                        scene = g.encode_scene(features)
+                        x1_pred_g = self._fm_x1_pred(x_t, t01, v_pred)
+                        s_list, p_list, c_list = [], [], []
+                        for j in range(n_g):
+                            if j == 0:
+                                x1_j = x1_pred_g                 # 复用主前向，省一次
+                            else:
+                                noise_j = torch.randn_like(noise)
+                                x_t_j = self._fm_interpolate(x1, noise_j, t01)
+                                v_j = self.transformer_dp(x_t_j, t_in, kv, self_cond=None)
+                                x1_j = self._fm_x1_pred(x_t_j, t01, v_j)
+                            traj_j = cumsum_traj(x1_j)           # [B, H, 3]
+                            sc_j, ho_j = g.score_traj(scene, traj_j[:, None])
+                            s_list.append(sc_j[:, 0])
+                            p_list.append(g.safety_product(ho_j)[:, 0])
+                            c_list.append(g.comfort_score(ho_j)[:, 0])
+
+                        S = torch.stack(s_list, 1)               # [B, n_g]
+                        P = torch.stack(p_list, 1)
+                        C = torch.stack(c_list, 1)
+                        denom = wt.sum().clamp_min(1.0)
+
+                        lam_a = float(getattr(self.config, 'lambda_score', 0.0))
+                        if lam_a > 0.0:
+                            temp = float(getattr(self.config, 'score_temperature', 1.0))
+                            soft = F.softmax(S / max(temp, 1e-6), dim=1)
+                            l_a = -((soft * S).sum(1) * wt).sum() / denom
+                            fm_loss = fm_loss + lam_a * l_a
+                            extras['fm_guidance_score'] = (-(soft * S).sum(1).mean()).detach()
+
+                        lam_b1 = float(getattr(self.config, 'lambda_safe_feas', 0.0))
+                        if lam_b1 > 0.0:
+                            m = float(getattr(self.config, 'safe_feas_margin', 0.5))
+                            l_b1 = (F.relu(m - P).mean(1) * wt).sum() / denom
+                            fm_loss = fm_loss + lam_b1 * l_b1
+                            extras['fm_safe_feas'] = l_b1.detach()
+                            extras['fm_safety_prod'] = P.mean().detach()
+
+                        lam_b2 = float(getattr(self.config, 'lambda_comfort_div', 0.0))
+                        if lam_b2 > 0.0 and n_g >= 2:
+                            tgt = float(getattr(self.config, 'comfort_div_target', 1.0))
+                            sd = C.std(dim=1)
+                            l_b2 = (((sd - tgt) ** 2) * wt).sum() / denom
+                            fm_loss = fm_loss + lam_b2 * l_b2
+                            extras['fm_comfort_std'] = sd.mean().detach()
             return fm_loss, extras
 
         timesteps = torch.randint(
@@ -544,6 +620,29 @@ class DPHead(nn.Module):
 
 
 class DPModel(nn.Module):
+    """轨迹生成模型。
+
+    注意：评价器引导模块 `_guidance` 是**冻结**的子模块，由 config 在构造时重建，
+    因此**不进 checkpoint**——否则每个 ckpt 会多出上百 MB（`save_top_k=100` 下不可接受）。
+    下面的 `state_dict` / `load_state_dict` 覆盖实现了这一点，且保持 `strict=True` 可用。
+    """
+
+    _GUIDANCE_PREFIX = '_guidance.'
+
+    def state_dict(self, *args, **kwargs):
+        sd = super().state_dict(*args, **kwargs)
+        # Lightning 可能在前面加 `agent.model.` 之类的前缀，故用「包含」判断
+        return {k: v for k, v in sd.items() if self._GUIDANCE_PREFIX not in k}
+
+    def load_state_dict(self, state_dict, strict=True, assign=False):
+        # 临时摘掉引导模块，避免 strict 加载时报「缺 _guidance.* 键」
+        g = getattr(self, '_guidance', None)
+        self._guidance = None
+        try:
+            return super().load_state_dict(state_dict, strict=strict, assign=assign)
+        finally:
+            self._guidance = g
+
     def __init__(self, config: DPConfig):
         super().__init__()
         self._config = config
@@ -591,6 +690,22 @@ class DPModel(nn.Module):
         if self._config.use_hist_ego_status:
             self._hist_status_encoding = nn.Linear((2 + 2 + 3) * 3, config.tf_d_model)
 
+        self._guidance = None
+        if bool(getattr(config, 'scorer_guidance', False)):
+            from navsim.agents.dp.scorer_guidance import ScorerGuidance
+            from navsim.agents.gtrs_aug.hydra_config_aug import HydraConfigAug
+            _sc = HydraConfigAug()
+            # 评分器与生成器共用同一套相机与轨迹采样配置；vocab 路径默认沿用本 config
+            _sc.trajectory_sampling = config.trajectory_sampling
+            _sc.vocab_path = (getattr(config, 'scorer_vocab_path', '')
+                              or getattr(config, 'vocab_path', ''))
+            self._guidance = ScorerGuidance(
+                _sc,
+                ckpt_path=getattr(config, 'scorer_ckpt', ''),
+                freeze=bool(getattr(config, 'scorer_freeze', True)),
+                use_dual_stream=bool(getattr(config, 'scorer_use_dual_stream', True)),
+            )
+
         self._trajectory_head = DPHead(
             num_poses=config.trajectory_sampling.num_poses,
             d_ffn=config.tf_d_ffn,
@@ -598,7 +713,8 @@ class DPModel(nn.Module):
             nhead=config.vadv2_head_nhead,
             nlayers=config.vadv2_head_nlayers,
             vocab_path=config.vocab_path,
-            config=config
+            config=config,
+            guidance=self._guidance,
         )
         if self._config.use_temporal_bev_kv:
             self.temporal_bev_fusion = nn.Conv2d(

@@ -241,6 +241,38 @@ class DPConfig(TransfuserConfig):
     bev_pixel_height: int = lidar_resolution_height // 2
     bev_pixel_size: float = 1 / pixels_per_meter
 
+    # ==================================================================
+    # 创新点 A/B：评价器引导的轨迹生成（论文 3.4.7 / 3.5.5 节）
+    # ==================================================================
+    # 总开关。关闭时本文件其余字段全部不生效，行为与改动前逐位一致。
+    scorer_guidance: bool = False
+    # 评分器检查点（第 4 章训练好的学生模型）。为空则用随机初始化——只用于跑通流程，
+    # 正式训练必须给真实 ckpt，否则引导信号没有意义。
+    scorer_ckpt: str = ''
+    # 评分器配置：默认从 HydraConfigAug() 构造，这里只需覆盖与 ckpt 不一致的字段。
+    scorer_vocab_path: str = ''          # 空则沿用本 config 的 vocab_path
+    scorer_use_dual_stream: bool = True  # 用论文式 (4-8) 的双流准则（推荐）
+    scorer_freeze: bool = True           # 冻结评分器参数；梯度仍穿过它回传到生成器
+
+    # —— A：评分引导 ——
+    lambda_score: float = 0.0            # 评分引导权重；0 表示关闭
+    score_temperature: float = 1.0       # softmax 温度（越大越平均地优化整池提案）
+
+    # —— B-1：安全可行性（乘性 → 一票否决）——
+    lambda_safe_feas: float = 0.0
+    safe_feas_margin: float = 0.5        # 四项安全概率乘积的下界
+
+    # —— B-2：舒适多样性（加性 → 评价器在这里作区分）——
+    lambda_comfort_div: float = 0.0
+    comfort_div_target: float = 1.0      # log 空间舒适分数的目标标准差
+
+    # 引导只在 t ≥ 该阈值时施加：t 很小时 x̂1 仍接近噪声，此时打分无意义。
+    guidance_t_min: float = 0.5
+    # 每次引导采样的提案条数（B-2 的方差估计需要 ≥2 条）。
+    guidance_samples: int = 2
+    # 每 N 步才做一次引导，用于在显存/算力紧张时降频。
+    guidance_every_n: int = 1
+
     num_bev_classes = 7
     bev_features_channels: int = 64
     bev_down_sample_factor: int = 4

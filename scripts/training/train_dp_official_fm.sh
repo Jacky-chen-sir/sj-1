@@ -72,6 +72,25 @@ fm_kin_weight="${FM_KIN_WEIGHT:-0.5}"
 fm_lattice_t_prob="${FM_LATTICE_T_PROB:-0.5}"
 # 训练采 t 用的 K 集合：评测要扫的每个 K 都必须在这里，否则那个 K 是 OOD
 fm_lattice_k_set="${FM_LATTICE_K_SET:-[2,3,4,5,8,10,20]}"
+
+# ===== 第 3 章创新点 A/B：评价器引导的生成（论文 3.4.7 / 3.5.5）=====
+# 默认全关；关闭时整块被跳过，行为与改动前逐位一致。
+# 开启前必须先把第 4 章的评分器训好，并用 SCORER_CKPT 指过去。
+scorer_guidance="${SCORER_GUIDANCE:-false}"
+scorer_ckpt="${SCORER_CKPT:-}"
+# A：评分引导（用可微评分头的分数把提案推向高分区）
+lambda_score="${LAMBDA_SCORE:-0.0}"
+score_temperature="${SCORE_TEMPERATURE:-1.0}"
+# B-1：安全可行性（安全项是乘性合取，安全乘积过低的提案必然归零）
+lambda_safe_feas="${LAMBDA_SAFE_FEAS:-0.0}"
+safe_feas_margin="${SAFE_FEAS_MARGIN:-0.5}"
+# B-2：舒适多样性（舒适项是加性析取，评价器在这里作区分）
+lambda_comfort_div="${LAMBDA_COMFORT_DIV:-0.0}"
+comfort_div_target="${COMFORT_DIV_TARGET:-1.0}"
+# 引导只在 t >= 该阈值时施加（t 小时 x̂1 还接近噪声，打分无意义）
+guidance_t_min="${GUIDANCE_T_MIN:-0.5}"
+guidance_samples="${GUIDANCE_SAMPLES:-2}"
+guidance_every_n="${GUIDANCE_EVERY_N:-1}"
 # x̂1 裁剪（DDPM clip_sample 的 FM 对应），少步采样必开
 fm_clip_sample="${FM_CLIP_SAMPLE:-true}"
 # 自洽监督：模型自己积分到 x̂_t + 动态剩余速度目标
@@ -161,6 +180,17 @@ python "${NAVSIM_DEVKIT_ROOT}/navsim/planning/script/run_training_dense.py" \
   ++agent.config.fm_sc_max_steps="${fm_sc_max_steps}" \
   ++agent.config.fm_sc_warmup_steps="${fm_sc_warmup_steps}" \
   ++agent.config.fm_self_conditioning="${fm_self_conditioning}" \
+  ++agent.config.scorer_guidance="${scorer_guidance}" \
+  ++agent.config.scorer_ckpt="${scorer_ckpt}" \
+  ++agent.config.lambda_score="${lambda_score}" \
+  ++agent.config.score_temperature="${score_temperature}" \
+  ++agent.config.lambda_safe_feas="${lambda_safe_feas}" \
+  ++agent.config.safe_feas_margin="${safe_feas_margin}" \
+  ++agent.config.lambda_comfort_div="${lambda_comfort_div}" \
+  ++agent.config.comfort_div_target="${comfort_div_target}" \
+  ++agent.config.guidance_t_min="${guidance_t_min}" \
+  ++agent.config.guidance_samples="${guidance_samples}" \
+  ++agent.config.guidance_every_n="${guidance_every_n}" \
   ++agent.config.vov_ckpt="${VOV_CKPT}" \
   cache_path="${CACHE_PATH:-null}" \
   force_cache_computation="${FORCE_CACHE_COMPUTATION:-false}"
