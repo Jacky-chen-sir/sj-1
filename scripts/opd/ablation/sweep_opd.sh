@@ -51,7 +51,7 @@ im_only head_only refine_only recall_only \
 tau_imi_1 tau_imi_4 tau_head_1 tau_head_4 tau_list_1 tau_list_4 \
 no_head no_recall emis_recall_1 topk_refine_32 topk_refine_1024 \
 rounds_0 rounds_1 rounds_2 ema \
-dual_stream prod_05 prod_10 head_scope_safe dual_stream_prod \
+dual_stream prod_05 prod_10 head_scope_safe dual_stream_prod fused_only \
 gate_off gate_05 gate_08 gate_095 legacy_all"}
 
 echo "=== OPD sweep ==="
@@ -109,6 +109,11 @@ want prod_05        && run_group "prod_05"          OPD_LAMBDA_PROD=0.5
 want prod_10        && run_group "prod_10"          OPD_LAMBDA_PROD=1.0
 want head_scope_safe && run_group "head_scope_safe" OPD_HEAD_SCOPE=safe
 want dual_stream_prod && run_group "dual_stream_prod" OPD_DUAL_STREAM_SCORE=true OPD_LAMBDA_PROD=0.5
+# fused_only = 论文表 3 ③「融合分数整体 KL（下界）」：双流结构不变，但蒸馏**不分解**——
+# 关掉四路分解信号（imi/逐头/精排/召回）与乘积项，只对全词表融合分数分布做 KL。
+# 它与 ⑥ 的对照就是「按 EPDMS 聚合结构分解蒸馏」是否必要；③ 若不劣于 ⑥，本文核心主张就空了。
+# ⚠ 必须与教师缓存口径一致（缓存要按 dual_stream_score=true 生成）。
+want fused_only     && run_group "fused_only"       OPD_DUAL_STREAM_SCORE=true OPD_LAMBDA_FUSED=1.0 OPD_LAMBDA_IMI=0 OPD_LAMBDA_HEAD=0 OPD_LAMBDA_REFINE=0 OPD_LAMBDA_RECALL=0 OPD_LAMBDA_PROD=0
 
 # —— 安全门后处理（`opd.safety_gate_ratio`，直接压 zero_pct）——
 # 实测 best 对照 zero_pct=9.89%、OPD=15.71%，每 1 个百分点约值 0.9 EPDMS 分，

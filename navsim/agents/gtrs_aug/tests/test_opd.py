@@ -300,6 +300,50 @@ def test_lambda_prod_zero_is_bitwise_noop_on_total():
     assert torch.equal(total, manual), (total.item(), manual.item())
 
 
+def test_distill_fused_zero_when_fused_scores_match_and_positive_when_they_differ():
+    """表 3 ③：师生融合分数分布相同 → 该路 KL 为 0；教师融合分数整体平移/重排 → 严格为正。"""
+    opd = _import_loss()
+    cfg = _cfg(lambda_fused=1.0)
+    preds = _student_preds(with_head_grad=False)
+    preds['coarse_fused_score'] = torch.randn(B, V)
+    cache = _teacher_cache(cfg, match_student=preds)
+    _, d_match = opd(preds, cache, cfg)
+    assert d_match['distill_fused'].abs() < 1e-6, d_match['distill_fused']
+
+    # 把教师侧前 16 个候选的融合分数显著抬高 → 分布不再一致
+    cache['coarse'] = cache['coarse'].clone()
+    cache['coarse'][:, :16] += 6.0
+    _, d_diff = opd(preds, cache, cfg)
+    assert d_diff['distill_fused'] > 1e-3, d_diff['distill_fused']
+
+
+def test_lambda_fused_zero_is_bitwise_noop_on_total():
+    """默认路径回归守卫：λ_fused=0 时总损失与不含该项逐位相同（新增项默认不改变训练行为）。"""
+    opd = _import_loss()
+    cfg = _cfg(lambda_fused=0.0)
+    preds = _student_preds(with_head_grad=False)
+    preds['coarse_fused_score'] = torch.randn(B, V)
+    cache = _teacher_cache(cfg)
+    total, d = opd(preds, cache, cfg)
+    manual = (cfg.opd.lambda_imi * d['distill_imi']
+              + cfg.opd.lambda_head * d['distill_head']
+              + cfg.opd.lambda_refine * d['distill_refine']
+              + cfg.opd.lambda_recall * d['distill_recall']
+              + cfg.opd.lambda_prod * d['distill_prod'])
+    assert torch.equal(total, manual), (total.item(), manual.item())
+
+
+def test_fused_only_group_zeroes_the_decomposed_signals():
+    """表 3 ③ 的格子口径：四路分解信号与乘积项全关时，总损失只由 distill_fused 一项构成。"""
+    opd = _import_loss()
+    cfg = _cfg(lambda_fused=1.0, lambda_imi=0.0, lambda_head=0.0,
+               lambda_refine=0.0, lambda_recall=0.0, lambda_prod=0.0)
+    preds = _student_preds(with_head_grad=False)
+    preds['coarse_fused_score'] = torch.randn(B, V)
+    total, d = opd(preds, _teacher_cache(cfg), cfg)
+    assert torch.equal(total, d['distill_fused']), (total.item(), d['distill_fused'].item())
+
+
 def test_head_scope_safe_supervises_four_heads_only():
     """head_scope='safe' 只蒸四项乘性安全头；'all' 覆盖全部八项。"""
     opd = _import_loss()

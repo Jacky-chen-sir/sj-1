@@ -78,6 +78,8 @@ if [ -n "${OPD_LAMBDA_RECALL:-}" ];            then opd_over+=( "++agent.config.
 # 创新点 2 乘积一致性项（式 4-23）与创新点 1 双流评分头的开关；默认值在 agent yaml 里，
 # 这里只在显式设了环境变量时覆盖。
 if [ -n "${OPD_LAMBDA_PROD:-}" ];              then opd_over+=( "++agent.config.opd.lambda_prod=${OPD_LAMBDA_PROD}" ); fi
+# 表 3 ③「融合分数整体 KL（下界）」：不分解、直接蒸全词表融合分数分布。
+if [ -n "${OPD_LAMBDA_FUSED:-}" ];             then opd_over+=( "++agent.config.opd.lambda_fused=${OPD_LAMBDA_FUSED}" ); fi
 if [ -n "${OPD_HEAD_SCOPE:-}" ];               then opd_over+=( "++agent.config.opd.head_scope=${OPD_HEAD_SCOPE}" ); fi
 if [ -n "${OPD_DUAL_STREAM_SCORE:-}" ];        then opd_over+=( "++agent.config.opd.dual_stream_score=${OPD_DUAL_STREAM_SCORE}" ); fi
 if [ -n "${OPD_BETA_IMI:-}" ];                 then opd_over+=( "++agent.config.opd.beta_imi=${OPD_BETA_IMI}" ); fi

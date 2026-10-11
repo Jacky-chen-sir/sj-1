@@ -323,6 +323,17 @@ def opd_distill_loss(student_pred: Dict[str, torch.Tensor], teacher_cache: Dict[
 
     out: Dict[str, torch.Tensor] = {}
 
+    # ---------- 0. 融合分数整体 KL（论文表 3 的 ③「下界对照」）----------
+    # 常规蒸馏做法：不区分指标的聚合语义，直接让学生的**全词表融合分数分布**去拟合教师的。
+    # 这是"不分解"的下界，用来检验按 EPDMS 聚合结构分解蒸馏的必要性。
+    # 注意与第 1 路的区别：第 1 路蒸的是 imi 头自己的分布（`student_pred['imi']`），
+    # 本路蒸的是组合层之后的融合分数（`coarse_fused_score`），二者不是同一个量。
+    s_log_fused = F.log_softmax(student_pred['coarse_fused_score'].float() / opd.tau_list, dim=-1)
+    t_log_fused = F.log_softmax(teacher_cache['coarse'].float().to(device) / opd.tau_list, dim=-1)
+    loss_fused = F.kl_div(s_log_fused, t_log_fused, reduction='none',
+                          log_target=True).sum(-1) * (opd.tau_list ** 2)
+    out['distill_fused'] = masked_mean(loss_fused)
+
     # ---------- 1. imi 分布蒸馏（前向 KL，均值=batchmean，乘 τ²） ----------
     s_log_imi = F.log_softmax(student_pred['imi'].float() / opd.tau_imi, dim=-1)      # [B,V]
     t_log_imi = F.log_softmax(teacher_cache['imi'].float().to(device) / opd.tau_imi, dim=-1)
@@ -381,7 +392,8 @@ def opd_distill_loss(student_pred: Dict[str, torch.Tensor], teacher_cache: Dict[
     loss_recall = -recall_mass
     out['distill_recall'] = masked_mean(loss_recall)
 
-    total = (opd.lambda_imi * out['distill_imi']
+    total = (float(getattr(opd, 'lambda_fused', 0.0)) * out['distill_fused']
+             + opd.lambda_imi * out['distill_imi']
              + opd.lambda_head * out['distill_head']
              + opd.lambda_refine * out['distill_refine']
              + opd.lambda_recall * out['distill_recall']
