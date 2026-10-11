@@ -188,6 +188,46 @@ python scripts/opd/analysis/bootstrap_ci.py \
 
 ---
 
+## 7. 决策过程 PCA 可视化（第 5 章 5.3 节）
+
+`decision_pca.py` 对应论文 5.3 节的四个小节，用子命令分开跑。**四个子命令都不需要训练**：
+`vocab` / `generation` 只读 npy，`scoring` 只读已有 pickle，`fullchain` 只读一个场景的缓存。
+
+```bash
+# 5.3.2 词表空间结构：8192 条锚点是否按驾驶意图聚成簇
+python scripts/opd/analysis/decision_pca.py vocab \
+    --vocab $NAVSIM_DEVKIT_ROOT/traj_final/test_8192_kmeans.npy \
+    --out figs/fig5_2_vocab_pca.png --csv figs/fig5_2_vocab_pca.csv --plot
+
+# 5.3.3 生成侧：FM 提案是否覆盖词表簇之间的空隙（投影基只在词表上拟合，其余复用同一组基）
+python scripts/opd/analysis/decision_pca.py generation \
+    --vocab $NAVSIM_DEVKIT_ROOT/traj_final/test_8192_kmeans.npy \
+    --fm /exp/fm_proposals.npy --ddpm /exp/ddpm_proposals.npy --gt /exp/gt_traj.npy \
+    --out figs/fig5_3_generation_pca.png --plot
+
+# 5.3.4 评价侧：师生粗筛分布是否靠拢（Top-1 一致率 / Spearman / Recall@K）
+python scripts/opd/analysis/decision_pca.py scoring \
+    --teacher /exp/opd_cache/teacher_navtest \
+    --student base_13k=/exp/opd_cache/base_step13000 \
+    --student opd_13k=/exp/opd_cache/opd_step13000 \
+    --out figs/fig5_4_scoring_pca.png --csv figs/fig5_4_scoring.csv --plot
+
+# 5.3.5 全链路：单场景的「候选云 → Top-K → argmax 输出」
+python scripts/opd/analysis/decision_pca.py fullchain \
+    --vocab $NAVSIM_DEVKIT_ROOT/traj_final/test_8192_kmeans.npy \
+    --cache /exp/opd_cache/opd_step13000 --scene <token> \
+    --out figs/fig5_5_fullchain_pca.png --plot
+```
+
+**为什么用 PCA 而不是 t-SNE**：PCA 是线性的，投影后的坐标有明确的方差解释含义，且可以用
+**同一组基**去投影不同来源的样本——这正是 5.3.3 与 5.3.5 要求「词表与提案在同一坐标系」的前提。
+t-SNE 的坐标不可解释、也不能对样本外数据直接投影，只适合作定性对照。
+
+**注意**：`vocab` / `generation` 两个子命令的输入 npy 支持 `[V,H,3]`（绝对位姿）与
+`[V,H,4]`（增量编码 `Δx, Δy, sinθ, cosθ`）两种格式，后者会自动 cumsum 还原。
+
+---
+
 ## 依赖
 
 `numpy`、`pandas`（必需）；`scipy`（可选，`rank_agreement.py` 的 Kendall τ 全量计算用它，
