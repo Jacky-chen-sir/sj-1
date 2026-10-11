@@ -32,6 +32,8 @@ gpu="${GPU:-0}"
 workers="${WORKERS:-8}"
 batch_size="${BS:-${BATCH_SIZE:-8}}"
 fm_steps="${FM_NUM_INFERENCE_STEPS:-20}"
+# 扩散基线对照组：USE_FM=false 时按 DDPM 口径评测（默认 true，与改动前一致）
+use_fm="${USE_FM:-true}"
 # 必须与训练时一致：自条件改变 input_emb 的 in_features，不传就会 size mismatch 直接抛异常。
 # 裁剪也要带上，否则少步（K=2/3）评测会外推出离分布很远的增量。
 fm_self_conditioning="${FM_SELF_CONDITIONING:-true}"
@@ -115,7 +117,7 @@ CUDA_VISIBLE_DEVICES="${gpu}" python "${NAVSIM_DEVKIT_ROOT}/navsim/planning/scri
   trainer.params.precision=32 \
   worker.threads_per_node="${workers}" \
   worker.log_to_driver=false \
-  ++agent.config.use_flow_matching=true \
+  ++agent.config.use_flow_matching="${use_fm}" \
   ++agent.config.fm_num_inference_steps="${fm_steps}" \
   ++agent.config.fm_self_conditioning="${fm_self_conditioning}" \
   ++agent.config.fm_clip_sample="${fm_clip_sample}" \
