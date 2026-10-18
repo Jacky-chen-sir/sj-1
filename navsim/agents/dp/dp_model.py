@@ -767,6 +767,14 @@ class DPModel(nn.Module):
                     'scorer_guidance=true 但没有给 scorer_ckpt：评分器会是随机初始化，'
                     '引导信号没有意义。请设置 SCORER_CKPT，或显式置 '
                     'scorer_allow_partial_load=true 表示“只跑通流程”。')
+            # 区间配反（floor >= t_min）会让 guidance_time_weight 恒为 0，
+            # 引导静默不生效——这正是上一轮排查里最难发现的一类失败。
+            _tf = float(getattr(config, 'guidance_t_floor', 0.1))
+            _tm = float(getattr(config, 'guidance_t_min', 0.5))
+            if _tf >= _tm:
+                raise ValueError(
+                    f'guidance_t_floor({_tf}) 必须小于 guidance_t_min({_tm})，'
+                    f'否则引导时间区间为空、引导不会生效。')
             # 不注册为子模块：评分器冻结、由 config 重建，绝不写入 generator ckpt
             object.__setattr__(self, '_guidance', ScorerGuidance(
                 _sc,
