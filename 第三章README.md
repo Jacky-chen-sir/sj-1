@@ -164,12 +164,33 @@ LAMBDA_COMFORT_DIV=0.05 \
 | `SAFE_FEAS_MARGIN` | `0.5` | B-1：四项安全概率乘积的下界 |
 | `LAMBDA_COMFORT_DIV` | `0.0` | B-2：舒适多样性约束权重 |
 | `COMFORT_DIV_TARGET` | `1.0` | B-2：log 空间舒适分数的目标标准差 |
-| `GUIDANCE_T_MIN` | `0.5` | 引导只在 `t ≥ 该阈值` 时施加（t 小时 x̂₁ 还接近噪声） |
+| `GUIDANCE_T_MIN` | `0.5` | 引导区间的**上界**；见下方「t 的约定」 |
+| `GUIDANCE_T_FLOOR` | `0.1` | 引导区间的**下界**；避免 `∂x̂₁/∂v ∝ t → 0` 的梯度消失区 |
+| `GUIDANCE_WARMUP_STEPS` | `2000` | 引导权重的线性 warmup（按训练步）；续训已收敛模型时必须有 |
 | `GUIDANCE_SAMPLES` | `2` | 每次引导采样的提案数 |
 | `GUIDANCE_EVERY_N` | `1` | 每 N 步施加一次引导 |
 
 > 评分器必须是**可微且与 EPDMS 同构**的第 4 章双流评分头；`scorer_freeze=true` 时
 > 评分器参数冻结，但梯度仍穿过它回传到生成器。
+
+**t 的约定（很重要）。** 本仓库的流匹配约定是
+
+```
+x_t = (1 − t)·x1 + t·noise      # t=0 是数据，t=1 是纯噪声
+```
+
+因此一步估计 `x̂₁ = x_t + t_eff·v/(1−σ)` 只在**低 t 端**可靠；t 大时 `x̂₁` 接近噪声，
+对它的打分没有意义。引导只在 `t ∈ [GUIDANCE_T_FLOOR, GUIDANCE_T_MIN]`（默认 `[0.1, 0.5]`）
+内施加。
+
+> ⚠ **历史 bug（2026-10-14 那次训练）**：旧实现写成 `t ≥ t_min`，方向反了——恰好只给
+> 最不可靠的一半步数打分，于是 5 epoch 续训从 **0.7380 掉到 0.6369**（DAC −9.5、EC −12.5）。
+> 已修正为区间门控，并加 `test_guidance_time_weight_is_low_t_not_high_t` 钉住方向。
+> 该次实验的完整记录见 `scripts/dp/runs/ch3_20261014_lambda01/RUN.md`。
+
+> `SCORER_ALLOW_PARTIAL_LOAD`（默认 `false`）：评分器 ckpt 的键与本模型**完全对不上**、
+> 或存在**缺键**时直接报错（缺键意味着那部分仍是随机权重）。多出来的键只提示、不阻断。
+> 以前是 `strict=False` 静默继续，会导致带着随机评分器跑完整个训练而无人察觉。
 
 ### 4.5 引导模块的单元测试（远程）
 
@@ -301,7 +322,7 @@ SWEEP_GROUPS="guide_lo guide_mid guide_hi struct_feas struct_div struct_both" \
 | `size mismatch` on `input_emb` | 评测没带 `FM_SELF_CONDITIONING=true`（须与训练一致） |
 | CUDA OOM | 降 `BS`（默认已降到 8）；或改 `FREEZE_EXCEPT_TRAJ_HEAD=true` 做只训轨迹头的对照 |
 | 扫描结果异常 | 检查该 K 是否在 `FM_LATTICE_K_SET` 内 |
-| 引导完全无效果 | 检查 `SCORER_GUIDANCE=true` 且 `SCORER_CKPT` 非空；再看 `GUIDANCE_T_MIN` 是否过大 |
+| 引导完全无效果 | 检查 `SCORER_GUIDANCE=true`、`SCORER_CKPT` 非空，且日志里没有 `完全不匹配` 报错；再看 `GUIDANCE_T_MIN` 是否设得比 `GUIDANCE_T_FLOOR` 还小（区间为空） |
 
 ---
 

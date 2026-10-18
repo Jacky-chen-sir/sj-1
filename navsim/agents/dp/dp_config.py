@@ -261,6 +261,9 @@ class DPConfig(TransfuserConfig):
     scorer_camera_height: int = 512
     scorer_use_dual_stream: bool = True  # 用论文式 (4-8) 的双流准则（推荐）
     scorer_freeze: bool = True           # 冻结评分器参数；梯度仍穿过它回传到生成器
+    # 评分器权重必须完整加载：键完全不匹配或存在缺键/多键时直接报错。
+    # 否则 strict=False 会让训练带着**随机初始化**的评分器跑完，引导信号完全是噪声。
+    scorer_allow_partial_load: bool = False
 
     # —— A：评分引导 ——
     lambda_score: float = 0.0            # 评分引导权重；0 表示关闭
@@ -274,8 +277,15 @@ class DPConfig(TransfuserConfig):
     lambda_comfort_div: float = 0.0
     comfort_div_target: float = 1.0      # log 空间舒适分数的目标标准差
 
-    # 引导只在 t ≥ 该阈值时施加：t 很小时 x̂1 仍接近噪声，此时打分无意义。
-    guidance_t_min: float = 0.5
+    # 引导只在 t ∈ [guidance_t_floor, guidance_t_min] 内施加。
+    # 本仓库的流匹配约定是 x_t = (1-t)·x1 + t·noise：**t=0 是数据、t=1 是纯噪声**，
+    # 因此一步估计 x̂1 只在**低 t 端**可靠；t 大时 x̂1 接近噪声，对它的打分没有意义。
+    # （旧实现写成 t >= t_min，等于只把引导加在最不可靠的一半步数上，已修正。）
+    guidance_t_floor: float = 0.1        # 下界：t→0 时 ∂x̂1/∂v ∝ t，梯度会消失
+    guidance_t_min: float = 0.5          # 上界
+    # 引导权重的线性 warmup（按训练步）。续训一个已收敛的模型时必须 ramp，
+    # 否则第一步就会把主损失淹没。
+    guidance_warmup_steps: int = 2000
     # 每次引导采样的提案条数（B-2 的方差估计需要 ≥2 条）。
     guidance_samples: int = 2
     # 每 N 步才做一次引导，用于在显存/算力紧张时降频。

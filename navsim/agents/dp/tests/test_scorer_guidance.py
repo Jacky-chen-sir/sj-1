@@ -22,6 +22,22 @@ from navsim.agents.gtrs_aug.hydra_config_aug import HydraConfigAug
 from navsim.agents.dp.scorer_guidance import (
     ScorerGuidance, guidance_loss, safety_feasibility_loss, comfort_diversity_loss,
 )
+from navsim.agents.dp.dp_model import guidance_time_weight
+
+
+def test_guidance_time_weight_is_low_t_not_high_t():
+    """钉住 t 的方向：x_t=(1-t)x1+t·noise，t=0 是数据、t=1 是噪声。
+
+    一步估计 x̂1 只在低 t 端可靠，所以引导必须落在 [t_floor, t_min] 内。
+    旧实现写成 t >= t_min（只给最不可靠的一半打分），导致 5 epoch 续训
+    从 0.7380 掉到 0.6369。这条测试防止方向再次写反。
+    """
+    t = torch.tensor([0.0, 0.05, 0.1, 0.3, 0.5, 0.8, 1.0])
+    w = guidance_time_weight(t, t_min=0.5, t_floor=0.1)
+    assert w.tolist() == [0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0], w.tolist()
+    # 高 t（接近纯噪声）必须被排除
+    assert guidance_time_weight(torch.tensor([0.9]), t_min=0.5, t_floor=0.1).item() == 0.0
+
 
 
 B, H, N = 2, 8, 4          # batch / 轨迹长度 / 提案数
@@ -137,6 +153,8 @@ def test_state_dict_excludes_guidance(tmp_path):
     cfg = DPConfig()
     cfg.trajectory_sampling.num_poses = H
     cfg.scorer_guidance = True
+    # 本测试只验证 state_dict 结构，不关心评分器权重；显式允许空 ckpt
+    cfg.scorer_allow_partial_load = True
     cfg.lambda_score = 0.1
     cfg.tf_d_model = D_MODEL
     cfg.tf_d_ffn = 2 * D_MODEL

@@ -61,14 +61,14 @@ class ScorerGuidance(nn.Module):
     """
 
     def __init__(self, scorer_config, ckpt_path: str = '', freeze: bool = True,
-                 use_dual_stream: bool = True):
+                 use_dual_stream: bool = True, allow_partial_load: bool = False):
         super().__init__()
         self.scorer = HydraModel(scorer_config)
         self._dual_stream = bool(use_dual_stream)
         self._num_poses = int(scorer_config.trajectory_sampling.num_poses)
 
         if ckpt_path:
-            self._load_ckpt(ckpt_path)
+            self._load_ckpt(ckpt_path, allow_partial=allow_partial_load)
         if freeze:
             for p in self.scorer.parameters():
                 p.requires_grad_(False)
@@ -79,13 +79,17 @@ class ScorerGuidance(nn.Module):
         )
 
     # ------------------------------------------------------------------
-    def _load_ckpt(self, path: str) -> None:
+    def _load_ckpt(self, path: str, allow_partial: bool = False) -> None:
         """加载评分器权重。
 
         兼容：
           - Lightning `state_dict` 外层包装
           - 第 4 章 OPD / GTRSAug：`agent.model.student.model.*`（优先学生，忽略 teacher）
           - 普通 `model.*` / 裸 HydraModel 键
+
+        **默认要求完整加载**：键完全不匹配、或存在缺键/多键时直接报错。否则
+        `strict=False` 会让训练带着随机初始化的评分器跑完，引导信号完全是噪声——
+        这种失败是静默的，只能从日志里发现。
         """
         sd = torch.load(path, map_location='cpu')
         for key in ('state_dict', 'model', 'model_state_dict'):
@@ -112,11 +116,28 @@ class ScorerGuidance(nn.Module):
         if stripped is None:
             stripped = sd
 
+        model_keys = set(self.scorer.state_dict().keys())
+        overlap = set(stripped) & model_keys
+        if not overlap:
+            raise RuntimeError(
+                f'ScorerGuidance: {path} 的键与本评分器**完全不匹配**'
+                f'（试过前缀 {prefixes}；剥前缀后 {len(stripped)} 个键，0 个命中）。'
+                f'继续训练只会得到随机评分器的引导信号。')
+
         missing, unexpected = self.scorer.load_state_dict(stripped, strict=False)
-        if missing:
-            logger.warning(f'ScorerGuidance: 缺 {len(missing)} 个键，前 5 个: {missing[:5]}')
+        # 多余的键（例如 ckpt 里带了与本评分器无关的 buffer）无害，只提示；
+        # **缺键**才意味着这部分参数仍是随机初始化，必须报错。
         if unexpected:
-            logger.warning(f'ScorerGuidance: 多 {len(unexpected)} 个键，前 5 个: {unexpected[:5]}')
+            logger.warning(f'ScorerGuidance: ckpt 多出 {len(unexpected)} 个键（已忽略），'
+                           f'前 5 个: {unexpected[:5]}')
+        if missing:
+            msg = (f'ScorerGuidance: 加载不完整——缺 {len(missing)} 键；'
+                   f'前 5 个: {missing[:5]}')
+            if not allow_partial:
+                raise RuntimeError(
+                    msg + '。缺键的部分仍是随机初始化。确认 ckpt 与 scorer 配置一致；'
+                          '确需强制继续请置 scorer_allow_partial_load=true（不推荐）。')
+            logger.warning(msg)
     # ------------------------------------------------------------------
     @staticmethod
     def adapt_features(features: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:

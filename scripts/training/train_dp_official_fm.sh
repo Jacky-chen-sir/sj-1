@@ -78,6 +78,9 @@ fm_lattice_k_set="${FM_LATTICE_K_SET:-[2,3,4,5,8,10,20]}"
 # 开启前必须先把第 4 章的评分器训好，并用 SCORER_CKPT 指过去。
 scorer_guidance="${SCORER_GUIDANCE:-false}"
 scorer_ckpt="${SCORER_CKPT:-}"
+# 评分器权重必须完整加载：键不匹配 / 缺键会直接报错，避免带着随机评分器静默训练。
+# 只有“先跑通流程”时才置 true。
+scorer_allow_partial_load="${SCORER_ALLOW_PARTIAL_LOAD:-false}"
 # 第 4 章评分器词表（OPD R34 默认 8192）；空则沿用生成器 vocab_path（通常不对）
 scorer_vocab_path="${SCORER_VOCAB_PATH:-${NAVSIM_DEVKIT_ROOT}/traj_final/test_8192_kmeans.npy}"
 # A：评分引导（用可微评分头的分数把提案推向高分区）
@@ -89,8 +92,13 @@ safe_feas_margin="${SAFE_FEAS_MARGIN:-0.5}"
 # B-2：舒适多样性（舒适项是加性析取，评价器在这里作区分）
 lambda_comfort_div="${LAMBDA_COMFORT_DIV:-0.0}"
 comfort_div_target="${COMFORT_DIV_TARGET:-1.0}"
-# 引导只在 t >= 该阈值时施加（t 小时 x̂1 还接近噪声，打分无意义）
+# 引导施加的时间上界（与下面的 t_floor 组成区间）
 guidance_t_min="${GUIDANCE_T_MIN:-0.5}"
+# 引导的时间区间 [t_floor, t_min]。注意 t=0 是数据、t=1 是纯噪声，
+# 一步估计 x̂1 只在低 t 端可靠——旧实现只加在 t>=t_min，方向是反的。
+guidance_t_floor="${GUIDANCE_T_FLOOR:-0.1}"
+# 引导权重线性 warmup（按步）。续训已收敛模型时必须 ramp。
+guidance_warmup_steps="${GUIDANCE_WARMUP_STEPS:-2000}"
 guidance_samples="${GUIDANCE_SAMPLES:-2}"
 guidance_every_n="${GUIDANCE_EVERY_N:-1}"
 # x̂1 裁剪（DDPM clip_sample 的 FM 对应），少步采样必开
@@ -146,7 +154,7 @@ echo "      fm_aux=${fm_traj_aux_weight}(pos=${fm_traj_aux_pos_weight},head=${fm
 echo "      lattice_t=${fm_lattice_t_prob} k_set=${fm_lattice_k_set} clip=${fm_clip_sample}"
 echo "      self_consistency_p=${fm_self_consistency_p}(max_steps=${fm_sc_max_steps},warmup=${fm_sc_warmup_steps}) self_cond=${fm_self_conditioning}"
 echo "      scorer_guidance=${scorer_guidance} ckpt=${scorer_ckpt:-none}"
-echo "      λ_score=${lambda_score} λ_safe=${lambda_safe_feas} λ_comfort=${lambda_comfort_div} t_min=${guidance_t_min} n=${guidance_samples}"
+echo "      λ_score=${lambda_score} λ_safe=${lambda_safe_feas} λ_comfort=${lambda_comfort_div} t∈[${guidance_t_floor},${guidance_t_min}] warmup=${guidance_warmup_steps} n=${guidance_samples}"
 
 python "${NAVSIM_DEVKIT_ROOT}/navsim/planning/script/run_training_dense.py" \
   --config-name competition_training \
@@ -187,6 +195,7 @@ python "${NAVSIM_DEVKIT_ROOT}/navsim/planning/script/run_training_dense.py" \
   ++agent.config.scorer_guidance="${scorer_guidance}" \
   ++agent.config.scorer_ckpt="'${scorer_ckpt}'" \
   ++agent.config.scorer_vocab_path="'${scorer_vocab_path}'" \
+  ++agent.config.scorer_allow_partial_load="${scorer_allow_partial_load}" \
   ++agent.config.lambda_score="${lambda_score}" \
   ++agent.config.score_temperature="${score_temperature}" \
   ++agent.config.lambda_safe_feas="${lambda_safe_feas}" \
@@ -194,6 +203,8 @@ python "${NAVSIM_DEVKIT_ROOT}/navsim/planning/script/run_training_dense.py" \
   ++agent.config.lambda_comfort_div="${lambda_comfort_div}" \
   ++agent.config.comfort_div_target="${comfort_div_target}" \
   ++agent.config.guidance_t_min="${guidance_t_min}" \
+  ++agent.config.guidance_t_floor="${guidance_t_floor}" \
+  ++agent.config.guidance_warmup_steps="${guidance_warmup_steps}" \
   ++agent.config.guidance_samples="${guidance_samples}" \
   ++agent.config.guidance_every_n="${guidance_every_n}" \
   ++agent.config.vov_ckpt="${VOV_CKPT}" \

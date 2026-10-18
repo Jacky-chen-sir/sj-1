@@ -230,6 +230,21 @@ def cumsum_traj(norm_trajs):
     return torch.cat([x, y, heading], -1)
 
 
+def guidance_time_weight(t01, t_min: float = 0.5, t_floor: float = 0.1):
+    """评价器引导在时间轴上的权重（0/1）。
+
+    本仓库的流匹配约定是 ``x_t = (1-t)·x1 + t·noise``：**t=0 是数据、t=1 是纯噪声**。
+    因此一步估计 ``x̂1 = x_t + t_eff·v/(1-σ)`` 只在**低 t 端**可靠；t 大时 x̂1 接近噪声，
+    对它的打分没有意义。引导只应在 ``[t_floor, t_min]`` 内施加。
+
+    下界 t_floor 的作用是避开 ``∂x̂1/∂v ∝ t → 0`` 的梯度消失区。
+
+    历史 bug：旧实现写成 ``t01 >= t_min``，等于只给最不可靠的那一半步数打分，
+    第三章一次 5-epoch 续训因此从 0.7380 掉到 0.6369。此函数与单测用于钉住方向。
+    """
+    return ((t01 >= t_floor) & (t01 <= t_min)).float()
+
+
 class DPHead(nn.Module):
     """Trajectory decoder. Architecture is the official SimpleDiffusionTransformer.
 
@@ -559,9 +574,17 @@ class DPHead(nn.Module):
                 g = self.guidance
                 every = max(1, int(getattr(self.config, 'guidance_every_n', 1)))
                 if self._sc_calls % every == 0:
-                    # 只在 t ≥ t_min 时施加：t 很小时 x̂1 仍接近噪声，评分无意义
+                    # x_t = (1-t)·x1 + t·noise：t=0 是数据、t=1 是纯噪声。
+                    # 一步估计 x̂1 只在低 t 端可靠，因此引导只在 [floor, t_min] 内施加。
+                    # （旧实现是 t >= t_min，方向反了——恰好只给最不可靠的一半步数打分。）
                     t_min = float(getattr(self.config, 'guidance_t_min', 0.5))
-                    wt = (t01 >= t_min).float()                      # [B]
+                    t_floor = float(getattr(self.config, 'guidance_t_floor', 0.1))
+                    wt = guidance_time_weight(t01, t_min=t_min, t_floor=t_floor)  # [B]
+                    # 续训已收敛模型时必须 ramp，否则第一步就把主损失淹没
+                    gwarm = 1.0
+                    gw = int(getattr(self.config, 'guidance_warmup_steps', 0))
+                    if gw > 0:
+                        gwarm = min(1.0, self._sc_calls / float(gw))
                     if wt.sum() > 0:
                         n_g = max(1, int(getattr(self.config, 'guidance_samples', 2)))
                         scene = g.encode_scene(features)
@@ -573,11 +596,19 @@ class DPHead(nn.Module):
                             else:
                                 noise_j = torch.randn_like(noise)
                                 x_t_j = self._fm_interpolate(x1, noise_j, t01)
-                                v_j = self.transformer_dp(x_t_j, t_in, kv, self_cond=None)
+                                # 与主前向保持同一 self-conditioning 口径。否则第 j>0 条
+                                # 提案是在不同条件下生成的，B-2 的 std 不可比。
+                                sc_j = None
+                                if (self.fm_self_conditioning
+                                        and bool(torch.rand((), device=device) < self.fm_self_cond_p)):
+                                    with torch.no_grad():
+                                        v0_j = self.transformer_dp(x_t_j, t_in, kv, self_cond=None)
+                                        sc_j = self._fm_x1_pred(x_t_j, t01, v0_j).view(B, -1)
+                                v_j = self.transformer_dp(x_t_j, t_in, kv, self_cond=sc_j)
                                 x1_j = self._fm_x1_pred(x_t_j, t01, v_j)
                             traj_j = cumsum_traj(x1_j)           # [B, H, 3]
-                            sc_j, ho_j = g.score_traj(scene, traj_j[:, None])
-                            s_list.append(sc_j[:, 0])
+                            score_j, ho_j = g.score_traj(scene, traj_j[:, None])
+                            s_list.append(score_j[:, 0])
                             p_list.append(g.safety_product(ho_j)[:, 0])
                             c_list.append(g.comfort_score(ho_j)[:, 0])
 
@@ -591,14 +622,14 @@ class DPHead(nn.Module):
                             temp = float(getattr(self.config, 'score_temperature', 1.0))
                             soft = F.softmax(S / max(temp, 1e-6), dim=1)
                             l_a = -((soft * S).sum(1) * wt).sum() / denom
-                            fm_loss = fm_loss + lam_a * l_a
-                            extras['fm_guidance_score'] = (-(soft * S).sum(1).mean()).detach()
+                            fm_loss = fm_loss + lam_a * gwarm * l_a
+                            extras['fm_guidance_score'] = l_a.detach()
 
                         lam_b1 = float(getattr(self.config, 'lambda_safe_feas', 0.0))
                         if lam_b1 > 0.0:
                             m = float(getattr(self.config, 'safe_feas_margin', 0.5))
                             l_b1 = (F.relu(m - P).mean(1) * wt).sum() / denom
-                            fm_loss = fm_loss + lam_b1 * l_b1
+                            fm_loss = fm_loss + lam_b1 * gwarm * l_b1
                             extras['fm_safe_feas'] = l_b1.detach()
                             extras['fm_safety_prod'] = P.mean().detach()
 
@@ -607,7 +638,7 @@ class DPHead(nn.Module):
                             tgt = float(getattr(self.config, 'comfort_div_target', 1.0))
                             sd = C.std(dim=1)
                             l_b2 = (((sd - tgt) ** 2) * wt).sum() / denom
-                            fm_loss = fm_loss + lam_b2 * l_b2
+                            fm_loss = fm_loss + lam_b2 * gwarm * l_b2
                             extras['fm_comfort_std'] = sd.mean().detach()
             return fm_loss, extras
 
@@ -721,12 +752,20 @@ class DPModel(nn.Module):
             _sc.camera_height = int(getattr(config, 'scorer_camera_height', 512))
             _sc.vocab_path = (getattr(config, 'scorer_vocab_path', '')
                               or getattr(config, 'vocab_path', ''))
+            _ckpt = getattr(config, 'scorer_ckpt', '')
+            _allow = bool(getattr(config, 'scorer_allow_partial_load', False))
+            if not _ckpt and not _allow:
+                raise ValueError(
+                    'scorer_guidance=true 但没有给 scorer_ckpt：评分器会是随机初始化，'
+                    '引导信号没有意义。请设置 SCORER_CKPT，或显式置 '
+                    'scorer_allow_partial_load=true 表示“只跑通流程”。')
             # 不注册为子模块：评分器冻结、由 config 重建，绝不写入 generator ckpt
             object.__setattr__(self, '_guidance', ScorerGuidance(
                 _sc,
-                ckpt_path=getattr(config, 'scorer_ckpt', ''),
+                ckpt_path=_ckpt,
                 freeze=bool(getattr(config, 'scorer_freeze', True)),
                 use_dual_stream=bool(getattr(config, 'scorer_use_dual_stream', True)),
+                allow_partial_load=_allow,
             ))
 
         self._trajectory_head = DPHead(

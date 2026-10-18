@@ -100,3 +100,58 @@ FM_SELF_CONDITIONING=true FM_CLIP_SAMPLE=true \
 | two_frame_extended_comfort | 0.8584 | 0.7331 |
 
 ep18 基线 CSV（本机）：`exp/train_dp_official_fm_joint/navtest-epoch-18-step-81776-fm20-b8-w8/2026.09.01.16.19.40/2026.09.01.21.16.07.csv`。那次评测命令没有传 `FM_SELF_CONDITIONING`（当时权重的 `input_emb` 仍是 32 列）。本次 ep22 必须传 `true`，和训练一致。
+
+---
+
+## 6. 复盘：这次为什么掉分（2026-10-18 排查）
+
+这次结果 **0.7380 → 0.6369** 不是"λ 调大了"那么简单，代码里有确定性 bug。
+
+### 6.1 确定 bug：引导的时间门控写反了
+
+本仓库的流匹配约定是 `x_t = (1−t)·x1 + t·noise`（`dp_model.py:_fm_interpolate`），
+推理也是从 `t=1` 积分到 `t=0`（`dp_model.py` 的 `forward`：`t_val = 1.0 - i*dt`）。
+所以 **t=0 是数据、t=1 是纯噪声**，一步估计 `x̂1` 只在**低 t 端**可靠。
+
+旧实现（`800764c` 起）是：
+
+```python
+wt = (t01 >= t_min).float()     # t_min = 0.5
+```
+
+即**只在 t ∈ [0.5, 1] 施加引导**——恰好是最不可靠、`x̂1` 接近噪声的一半步数。
+注释写的「t 很小时 x̂1 仍接近噪声」也与实际约定相反。A、B-1、B-2 三项损失共用这个门控，
+等于在约 50% 的训练步上往一个已收敛的模型里注入结构化噪声。5 epoch（约 4.3 万步）足以
+把 DAC 拉低 9.5 分、EC 拉低 12.5 分。
+
+**修复**：改为区间门控 `t ∈ [guidance_t_floor, guidance_t_min]`（默认 `[0.1, 0.5]`），
+下界避开 `∂x̂1/∂v ∝ t → 0` 的梯度消失区。新增纯函数 `guidance_time_weight()` 与单测
+`test_guidance_time_weight_is_low_t_not_high_t` 钉住方向。
+
+### 6.2 另外两处已加固
+
+- **评分器加载失败是静默的**：`strict=False` 下，前缀剥错或缺键时只会打一条 warning，
+  然后带着**随机权重**跑完训练。现在键完全不匹配 / 缺键 / 多键都会直接报错
+  （`scorer_allow_partial_load=false` 为默认）。
+- **没有 warmup**：续训已收敛模型时，引导第一步就按全强度施加。新增
+  `guidance_warmup_steps`（默认 2000 步线性 ramp）。
+- 另修正：`GUIDANCE_SAMPLES>1` 时第 j>0 条提案没有走 self-conditioning，与主前向口径
+  不一致，使 B-2 的 `std` 不可比；现已与主前向对齐。
+
+### 6.3 还没排除的混杂因素
+
+`epoch=18` 的 `input_emb` 是 32 列（当时未开自条件），这次开了
+`FM_SELF_CONDITIONING=true`，`input_emb` 被零填充到 64 列。零填充使初始前向不变，
+但它与引导同时介入，会让归因变模糊。
+
+**下一步必须做的对照**：从同一个 `epoch=18` 续 5 epoch，三个 λ 全置 0、其余开关不变。
+
+```bash
+RESUME_CKPT=.../epoch=18-step=81776.ckpt MAX_EPOCHS=23 \
+LAMBDA_SCORE=0 LAMBDA_SAFE_FEAS=0 LAMBDA_COMFORT_DIV=0 \
+SCORER_GUIDANCE=false EXP_NAME=train_dp_ch3_control5ep \
+  bash scripts/training/train_dp_official_fm.sh
+```
+
+若对照也掉到 ~0.64，问题在续训/自条件；若对照保持在 ~0.73，则掉分由引导导致，
+可用修好的门控 + 小 λ + warmup 重跑验证。

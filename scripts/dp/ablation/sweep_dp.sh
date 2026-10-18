@@ -44,8 +44,8 @@ if [ "${1:-}" = "--list" ]; then
   guide_lo        评分引导权重 0.05
   guide_mid       评分引导权重 0.2
   guide_hi        评分引导权重 0.5
-  guide_tmin03    引导时机阈值 0.3（更早介入）
-  guide_tmin07    引导时机阈值 0.7（更晚介入）
+  guide_tmin03    引导区间上界 0.3（只覆盖低 t 的可靠段）
+  guide_tmin07    引导区间上界 0.7（覆盖到较噪声的一段）
 
 创新点 B（5.4.2）
   struct_feas     只开安全可行性
@@ -154,7 +154,9 @@ for pair in "guide_lo 0.05" "guide_mid 0.2" "guide_hi 0.5"; do
     SCORER_GUIDANCE=true
 done
 
-# —— 创新点 A：引导时机（t_min）——
+# —— 创新点 A：引导时间区间上界（t_min；下界统一用 guidance_t_floor）——
+# 注意约定：x_t=(1-t)x1+t·noise，t=0 数据、t=1 噪声。t_min 越大，区间越宽、
+# 越会覆盖到 x̂1 不可靠的高 t 段；越小则只在可靠的低 t 段引导。
 for pair in "guide_tmin03 0.3" "guide_tmin07 0.7"; do
   set -- ${pair}
   want "$1" && run_group "$1" \
