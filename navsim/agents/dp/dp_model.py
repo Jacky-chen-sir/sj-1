@@ -569,6 +569,9 @@ class DPHead(nn.Module):
             # B-1 安全可行性 ：安全项是乘性合取，安全乘积过低的提案在评价阶段必然归零
             # B-2 舒适多样性 ：舒适项是加性析取，评价器正是在这一维度上作区分
             # ==============================================================
+            # 纯（不含引导的）损失量级。没有它就算不出"引导项 / 主损失"的比值，
+            # 而比值过大正是权重失控的唯一早期信号。
+            extras['fm_loss_base'] = fm_loss.detach()
             if (self.guidance is not None and features is not None
                     and self._guidance_weights_any()):
                 g = self.guidance
@@ -585,6 +588,10 @@ class DPHead(nn.Module):
                     gw = int(getattr(self.config, 'guidance_warmup_steps', 0))
                     if gw > 0:
                         gwarm = min(1.0, self._sc_calls / float(gw))
+                    # 区间内样本比例与当前 warmup 系数：前者解释"这一步为什么没有引导"，
+                    # 后者解释"早期为什么引导很弱"。
+                    extras['fm_guidance_frac'] = (wt.sum() / max(B, 1)).detach()
+                    extras['fm_guidance_warm'] = torch.tensor(gwarm, device=device)
                     if wt.sum() > 0:
                         n_g = max(1, int(getattr(self.config, 'guidance_samples', 2)))
                         scene = g.encode_scene(features)
@@ -640,6 +647,7 @@ class DPHead(nn.Module):
                             l_b2 = (((sd - tgt) ** 2) * wt).sum() / denom
                             fm_loss = fm_loss + lam_b2 * gwarm * l_b2
                             extras['fm_comfort_std'] = sd.mean().detach()
+                            extras['fm_comfort_div'] = l_b2.detach()
             return fm_loss, extras
 
         timesteps = torch.randint(

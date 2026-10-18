@@ -326,6 +326,31 @@ SWEEP_GROUPS="guide_lo guide_mid guide_hi struct_feas struct_div struct_both" \
 
 ---
 
+## 8.1 引导健康度体检（跑之前先看这个）
+
+引导项没有天然上界：评分头输出对数空间分数（约 −3.5~0），而流匹配主损失收敛后可能只有 0.05。
+**引导压过主损失是这类方法最常见的失效方式**，且从最终 navtest 上看不出来。
+
+训练开始后先跑：
+
+```bash
+python scripts/dp/analysis/guidance_health.py exp/logs/<你的训练日志>.log
+```
+
+判据：
+
+| 信号 | 含义 | 处理 |
+|---|---|---|
+| `L_score / base > 1` | 引导项已压过主损失 | 降 λ（先试 0.02）或延长 warmup |
+| `fm_safety_prod` 长期 < 0.2 | 安全 hinge 一直激活、主导梯度 | 把 `SAFE_FEAS_MARGIN` 降到 0.2–0.3 |
+| `fm_guidance_frac ≈ 0` | 时间区间配置错误，引导根本没生效 | 检查 `GUIDANCE_T_FLOOR/T_MIN` |
+| `fm_guidance_warm` 长期很小 | warmup 太长，等效于没开引导 | 调小 `GUIDANCE_WARMUP_STEPS` |
+
+> 若日志里没有 `fm_loss_base` / `fm_guidance_frac`，说明跑的是 `b2b3d58` 之前的代码；
+> 这两项是之后才加的，需要重启用新代码才会出现。
+
+---
+
 ## 9. 已知缺口
 
 1. **`scripts/evaluation/collect_dp_step_scan.py` 缺失**：步数扫描的汇总步骤跑不了，

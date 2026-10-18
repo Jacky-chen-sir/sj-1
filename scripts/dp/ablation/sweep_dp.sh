@@ -41,6 +41,7 @@ if [ "${1:-}" = "--list" ]; then
   comp_no_selfcond 去掉自条件输入
 
 创新点 A（5.4.2）
+  guide_xs        评分引导权重 0.02（修复门控后的保守档）
   guide_lo        评分引导权重 0.05
   guide_mid       评分引导权重 0.2
   guide_hi        评分引导权重 0.5
@@ -145,7 +146,7 @@ want comp_no_selfcond && run_group "comp_no_selfcond" \
 
 # —— 创新点 A：评分引导权重扫描（5.4.2）——
 # 权重的量级比其余项更敏感：过大会模式塌缩，过小不起作用，所以先扫三档。
-for pair in "guide_lo 0.05" "guide_mid 0.2" "guide_hi 0.5"; do
+for pair in "guide_xs 0.02" "guide_lo 0.05" "guide_mid 0.2" "guide_hi 0.5"; do
   set -- ${pair}
   want "$1" && run_group "$1" \
     FM_TRAJ_AUX_WEIGHT=0.5 FM_KIN_WEIGHT=0.5 \
