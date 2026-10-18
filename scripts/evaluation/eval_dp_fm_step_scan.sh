@@ -45,6 +45,7 @@ for k in ${steps_list}; do
   echo "=============================================================="
   CKPT="${ckpt}" \
   FM_NUM_INFERENCE_STEPS="${k}" \
+  DDPM_NUM_INFERENCE_STEPS="${k}" \
   EXP_NAME="${tag}/stepscan-${tag}-K${k}" \
   USE_FM="${use_fm}" \
     bash "${SCRIPT_DIR}/eval_dp_fm_joint_navtest.sh"

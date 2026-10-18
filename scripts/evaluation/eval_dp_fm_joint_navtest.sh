@@ -32,6 +32,9 @@ gpu="${GPU:-0}"
 workers="${WORKERS:-8}"
 batch_size="${BS:-${BATCH_SIZE:-8}}"
 fm_steps="${FM_NUM_INFERENCE_STEPS:-20}"
+# DDPM 分支读的是 ddpm_num_inference_steps（不是 fm_num_inference_steps）。
+# 基线步数扫描必须单独传，否则所有 K 都会用默认 100。
+ddpm_steps="${DDPM_NUM_INFERENCE_STEPS:-100}"
 # 扩散基线对照组：USE_FM=false 时按 DDPM 口径评测（默认 true，与改动前一致）
 use_fm="${USE_FM:-true}"
 # 必须与训练时一致：自条件改变 input_emb 的 in_features，不传就会 size mismatch 直接抛异常。
@@ -119,6 +122,7 @@ CUDA_VISIBLE_DEVICES="${gpu}" python "${NAVSIM_DEVKIT_ROOT}/navsim/planning/scri
   worker.log_to_driver=false \
   ++agent.config.use_flow_matching="${use_fm}" \
   ++agent.config.fm_num_inference_steps="${fm_steps}" \
+  ++agent.config.ddpm_num_inference_steps="${ddpm_steps}" \
   ++agent.config.fm_self_conditioning="${fm_self_conditioning}" \
   ++agent.config.fm_clip_sample="${fm_clip_sample}" \
   experiment_name="${experiment_name}" \
