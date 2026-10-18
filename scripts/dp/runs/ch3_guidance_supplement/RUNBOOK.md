@@ -117,3 +117,51 @@ python scripts/dp/analysis/guidance_health.py exp/logs/<tag>_*.log
 
 若 `g_xs` 无正收益，第三章退回「生成侧归因分析」的写法，
 把 0.7305 → 0.7380 → 0.7935 这条归因链作为实证结论。
+
+## 7. 运行顺序（先读这一节）
+
+### 7.1 要不要先重跑 `sweep_dp.sh` 里的 `base`？
+
+**不需要。** 两者回答的是不同问题：
+
+| 格子 | 配置 | 回答的问题 |
+|---|---|---|
+| `sweep_dp.sh: base` | **所有** FM 改进关掉 | 「结构化改进作为一组有没有用」 |
+| `sweep_dp.sh: full_noguide` | 改进全开、**引导关** | 组件消融的正确参照系 |
+| 本目录 `control` | 从 ep18 续训，改进全开、**引导关** | 引导实验的正确参照系 |
+
+引导实验的基线是 ep18（0.7380）+ `control`，不是 `base`。
+若先跑 `base`，你得到的只是「关掉全部改进后掉到多少」，对判断引导没有帮助。
+
+### 7.2 严格按这个顺序
+
+```
+① git pull                    # 到最新代码（含诊断与校验）
+② STAGE=0  → control          # 必跑，1 次训练
+③ 判读 control
+     ├─ ≥ 0.73 → 继续
+     └─ < 0.73 → 停：查续训/自条件，别做引导
+④ STAGE=1  → g_xs, g_s        # 2 次训练
+⑤ 判读：g_xs 相对 control 的净差
+     ├─ > +0.003 → 引导有正收益，进入 ⑥
+     └─ ≤ 0     → 引导仍无收益，转「生成—评价归因」写法
+⑥ STAGE=2  → warm0/band03/n4/margin03   # 仅当 ⑤ 为正
+⑦ 组件消融（支撑「结构化监督」贡献）
+     SWEEP_GROUPS="full_noguide comp_no_kin comp_no_aux comp_no_lattice comp_no_sc comp_no_selfcond"
+⑧ 步数扫描（最便宜，只需评测，不需训练）
+     CKPT=<最终 ckpt> TAG=fm_dp bash scripts/evaluation/eval_dp_fm_step_scan.sh
+```
+
+### 7.3 每一步都先看健康度
+
+```bash
+python scripts/dp/analysis/guidance_health.py exp/logs/<tag>_*.log
+```
+
+Stage 0 没有引导，这条只对 Stage 1/2 有意义。
+
+### 7.4 为什么不能把 `full` 当成组件的参照系
+
+旧版 `sweep_dp.sh` 的 `comp_*` 组继承了 `full` 的 λ=0.2/0.1/0.05 引导。
+那样单格差异会同时包含「去掉该项」和「带着一个会掉分的引导」两件事，无法归因。
+现已改为相对 `full_noguide`（引导关闭）。

@@ -21,7 +21,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 TRAIN="${ROOT_DIR}/scripts/training/train_dp_official_fm.sh"
 
 export NAVSIM_EXP_ROOT="${NAVSIM_EXP_ROOT:-/home/ws/navsim_workspace/exp}"
@@ -33,7 +33,8 @@ if [ "${1:-}" = "--list" ]; then
   cat <<'EOF'
 组件消融（5.4.1，全部相对 full 逐项关闭）
   base            全关（对照基线）
-  full            全开（= 论文完整配置，含 A/B 需另设 SCORER_CKPT）
+  full_noguide    全开但不带引导（组件消融与引导实验的参照系）
+  full            全开 + 引导（= 论文完整配置，需另设 SCORER_CKPT）
   comp_no_kin     去掉运动学监督（加速度/jerk）
   comp_no_aux     去掉绝对轨迹辅助损失（漂移 + 航向）
   comp_no_lattice 去掉推理网格 t 采样（回到纯连续均匀采样）
@@ -101,48 +102,34 @@ echo "[INFO] 每个格子训练 ${EPOCHS} epoch"
 echo "[INFO] 评分器: ${SCORER_CKPT:-<未设置，创新点 A/B 的组会退化为随机评分器>}"
 echo
 
-# —— 参照系：先跑这两个 ——
+# —— 参照系 ——
+# base         = 所有 FM 改进全关（回答"结构化改进作为一组是否有用"）
+# full_noguide = 所有 FM 改进全开、引导关闭（**组件消融与引导实验的正确参照系**）
+# full         = full_noguide + 引导（论文完整配置）
 want base && run_group "base" \
   FM_TRAJ_AUX_WEIGHT=0.0 FM_KIN_WEIGHT=0.0 \
   FM_LATTICE_T_PROB=0.0 FM_SELF_CONSISTENCY_P=0.0 FM_SELF_CONDITIONING=false \
   LAMBDA_SCORE=0.0 LAMBDA_SAFE_FEAS=0.0 LAMBDA_COMFORT_DIV=0.0
 
+COMP_BASE=(FM_TRAJ_AUX_WEIGHT=0.5 FM_KIN_WEIGHT=0.5
+           FM_LATTICE_T_PROB=0.5 FM_SELF_CONSISTENCY_P=0.5 FM_SELF_CONDITIONING=true
+           LAMBDA_SCORE=0.0 LAMBDA_SAFE_FEAS=0.0 LAMBDA_COMFORT_DIV=0.0
+           SCORER_GUIDANCE=false)
+
+want full_noguide && run_group "full_noguide" "${COMP_BASE[@]}"
+
 want full && run_group "full" \
-  FM_TRAJ_AUX_WEIGHT=0.5 FM_KIN_WEIGHT=0.5 \
-  FM_LATTICE_T_PROB=0.5 FM_SELF_CONSISTENCY_P=0.5 FM_SELF_CONDITIONING=true \
+  "${COMP_BASE[@]}" \
   LAMBDA_SCORE=0.2 LAMBDA_SAFE_FEAS=0.1 LAMBDA_COMFORT_DIV=0.05 \
   SCORER_GUIDANCE=true
 
-# —— 组件消融（5.4.1）：每项都是「full 去掉该项」——
-want comp_no_kin && run_group "comp_no_kin" \
-  FM_TRAJ_AUX_WEIGHT=0.5 FM_KIN_WEIGHT=0.0 \
-  FM_LATTICE_T_PROB=0.5 FM_SELF_CONSISTENCY_P=0.5 FM_SELF_CONDITIONING=true \
-  LAMBDA_SCORE=0.2 LAMBDA_SAFE_FEAS=0.1 LAMBDA_COMFORT_DIV=0.05 \
-  SCORER_GUIDANCE=true
-
-want comp_no_aux && run_group "comp_no_aux" \
-  FM_TRAJ_AUX_WEIGHT=0.0 FM_KIN_WEIGHT=0.5 \
-  FM_LATTICE_T_PROB=0.5 FM_SELF_CONSISTENCY_P=0.5 FM_SELF_CONDITIONING=true \
-  LAMBDA_SCORE=0.2 LAMBDA_SAFE_FEAS=0.1 LAMBDA_COMFORT_DIV=0.05 \
-  SCORER_GUIDANCE=true
-
-want comp_no_lattice && run_group "comp_no_lattice" \
-  FM_TRAJ_AUX_WEIGHT=0.5 FM_KIN_WEIGHT=0.5 \
-  FM_LATTICE_T_PROB=0.0 FM_SELF_CONSISTENCY_P=0.5 FM_SELF_CONDITIONING=true \
-  LAMBDA_SCORE=0.2 LAMBDA_SAFE_FEAS=0.1 LAMBDA_COMFORT_DIV=0.05 \
-  SCORER_GUIDANCE=true
-
-want comp_no_sc && run_group "comp_no_sc" \
-  FM_TRAJ_AUX_WEIGHT=0.5 FM_KIN_WEIGHT=0.5 \
-  FM_LATTICE_T_PROB=0.5 FM_SELF_CONSISTENCY_P=0.0 FM_SELF_CONDITIONING=true \
-  LAMBDA_SCORE=0.2 LAMBDA_SAFE_FEAS=0.1 LAMBDA_COMFORT_DIV=0.05 \
-  SCORER_GUIDANCE=true
-
-want comp_no_selfcond && run_group "comp_no_selfcond" \
-  FM_TRAJ_AUX_WEIGHT=0.5 FM_KIN_WEIGHT=0.5 \
-  FM_LATTICE_T_PROB=0.5 FM_SELF_CONSISTENCY_P=0.5 FM_SELF_CONDITIONING=false \
-  LAMBDA_SCORE=0.2 LAMBDA_SAFE_FEAS=0.1 LAMBDA_COMFORT_DIV=0.05 \
-  SCORER_GUIDANCE=true
+# —— 组件消融（5.4.1）：每项都是「full_noguide 去掉该项」——
+# 关键：这些格子**不带引导**。否则单格差异会与引导的收益/损失纠缠在一起。
+want comp_no_kin      && run_group "comp_no_kin"      "${COMP_BASE[@]}" FM_KIN_WEIGHT=0.0
+want comp_no_aux      && run_group "comp_no_aux"      "${COMP_BASE[@]}" FM_TRAJ_AUX_WEIGHT=0.0
+want comp_no_lattice  && run_group "comp_no_lattice"  "${COMP_BASE[@]}" FM_LATTICE_T_PROB=0.0
+want comp_no_sc       && run_group "comp_no_sc"       "${COMP_BASE[@]}" FM_SELF_CONSISTENCY_P=0.0
+want comp_no_selfcond && run_group "comp_no_selfcond" "${COMP_BASE[@]}" FM_SELF_CONDITIONING=false
 
 # —— 创新点 A：评分引导权重扫描（5.4.2）——
 # 权重的量级比其余项更敏感：过大会模式塌缩，过小不起作用，所以先扫三档。
