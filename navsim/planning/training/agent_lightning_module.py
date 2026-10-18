@@ -137,6 +137,67 @@ class AgentLightningModule(pl.LightningModule):
         """Inherited, see superclass."""
         return self.agent.get_optimizers()
 
+    def on_load_checkpoint(self, checkpoint: Dict) -> None:
+        """Pad Adam moments when fm_self_conditioning widens input_emb.
+
+        ``SimpleDiffusionTransformer._expand_input_emb_hook`` zero-pads
+        ``input_emb.weight`` from (d, D) → (d, 2D) so a non-SC ckpt can resume
+        with self-conditioning on. Lightning still restores optimizer_states
+        with the old (d, D) shape, and the first Adam step then crashes with
+        ``size of tensor a (D) must match ... (2D)``. Expand matching moments
+        the same way before PL loads them.
+        """
+        if not isinstance(self.agent, DPAgent):
+            return
+        if not bool(getattr(self.agent._config, 'fm_self_conditioning', False)):
+            return
+        opt_states = checkpoint.get('optimizer_states')
+        if not opt_states:
+            return
+
+        # Rebuild the same param order configure_optimizers will use.
+        opt = self.agent.get_optimizers()
+        if isinstance(opt, dict):
+            opt = opt['optimizer']
+        params = [p for g in opt.param_groups for p in g['params']]
+
+        want = None
+        for name, p in self.agent.model.named_parameters():
+            if name.endswith('transformer_dp.input_emb.weight'):
+                want = p
+                break
+        if want is None:
+            return
+
+        try:
+            pidx = next(i for i, p in enumerate(params) if p is want)
+        except StopIteration:
+            return
+
+        n_fixed = 0
+        for ost in opt_states:
+            st = ost.get('state', {}).get(pidx)
+            if not st:
+                continue
+            for key in ('exp_avg', 'exp_avg_sq'):
+                have = st.get(key)
+                if have is None or not hasattr(have, 'shape'):
+                    continue
+                if tuple(have.shape) == tuple(want.shape):
+                    continue
+                if (have.dim() == 2 and have.shape[0] == want.shape[0]
+                        and have.shape[1] < want.shape[1]):
+                    padded = have.new_zeros(want.shape)
+                    padded[:, :have.shape[1]] = have
+                    st[key] = padded
+                    n_fixed += 1
+        if n_fixed:
+            import logging
+            logging.getLogger(__name__).info(
+                "on_load_checkpoint: padded input_emb Adam state "
+                "(%d tensors) for fm_self_conditioning", n_fixed
+            )
+
     def predict_step(
             self,
             batch: Tuple[Dict[str, Tensor], Dict[str, Tensor]],

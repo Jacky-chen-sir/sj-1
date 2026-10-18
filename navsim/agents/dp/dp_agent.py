@@ -235,11 +235,14 @@ class DPAgent(AbstractAgent):
             filename="{epoch:02d}-{step:04d}",
         )
         # Mid-epoch snapshots so a late-epoch crash does not lose ~hours of work
-        # (ported from gtrs_aug agent).
+        # (ported from gtrs_aug agent). Keep only a few; every-1k + save_top_k=-1
+        # previously filled the root disk (~1.3G × dozens of steps).
         step_callback = ModelCheckpoint(
-            every_n_train_steps=1000,
+            every_n_train_steps=2000,
             save_on_train_epoch_end=False,
-            save_top_k=-1,
+            save_top_k=3,
+            monitor="step",
+            mode="max",
             dirpath=f"{os.environ.get('NAVSIM_EXP_ROOT')}/{self._config.ckpt_path}/",
             filename="step-{step:06d}",
         )

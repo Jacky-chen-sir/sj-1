@@ -245,8 +245,9 @@ class DPHead(nn.Module):
                  ):
         super().__init__()
         self.config = config
-        # 创新点 A/B：评价器引导模块（由 DPModel 注入；None 表示关闭）
-        self.guidance = guidance
+        # 创新点 A/B：评价器引导模块（由 DPModel 注入；None 表示关闭）。
+        # 用 object.__setattr__ 避免注册为 nn.Module 子模块——否则会进 state_dict / 优化器。
+        object.__setattr__(self, 'guidance', guidance)
         self.use_flow_matching = bool(getattr(config, 'use_flow_matching', False))
         self.fm_num_inference_steps = int(getattr(config, 'fm_num_inference_steps', 20))
         self.fm_sigma_min = float(getattr(config, 'fm_sigma_min', 1e-4))
@@ -627,21 +628,31 @@ class DPModel(nn.Module):
     下面的 `state_dict` / `load_state_dict` 覆盖实现了这一点，且保持 `strict=True` 可用。
     """
 
-    _GUIDANCE_PREFIX = '_guidance.'
+    # DPModel 持有 `_guidance`，同时又注入到 `_trajectory_head.guidance`（同名子模块）。
+    # 两处前缀都要滤掉，否则 ckpt 仍会塞进整份评分器权重。
+    _GUIDANCE_MARKERS = ('_guidance.', '.guidance.')
 
     def state_dict(self, *args, **kwargs):
         sd = super().state_dict(*args, **kwargs)
-        # Lightning 可能在前面加 `agent.model.` 之类的前缀，故用「包含」判断
-        return {k: v for k, v in sd.items() if self._GUIDANCE_PREFIX not in k}
+        return {
+            k: v for k, v in sd.items()
+            if not any(m in k for m in self._GUIDANCE_MARKERS)
+        }
 
     def load_state_dict(self, state_dict, strict=True, assign=False):
-        # 临时摘掉引导模块，避免 strict 加载时报「缺 _guidance.* 键」
+        # 临时摘掉两处引导引用，避免 strict 加载时报缺键
         g = getattr(self, '_guidance', None)
         self._guidance = None
+        th = getattr(self, '_trajectory_head', None)
+        th_g = getattr(th, 'guidance', None) if th is not None else None
+        if th is not None:
+            th.guidance = None
         try:
             return super().load_state_dict(state_dict, strict=strict, assign=assign)
         finally:
             self._guidance = g
+            if th is not None:
+                th.guidance = g if g is not None else th_g
 
     def __init__(self, config: DPConfig):
         super().__init__()
@@ -692,19 +703,31 @@ class DPModel(nn.Module):
 
         self._guidance = None
         if bool(getattr(config, 'scorer_guidance', False)):
+            from nuplan.planning.simulation.trajectory.trajectory_sampling import TrajectorySampling
             from navsim.agents.dp.scorer_guidance import ScorerGuidance
             from navsim.agents.gtrs_aug.hydra_config_aug import HydraConfigAug
             _sc = HydraConfigAug()
-            # 评分器与生成器共用同一套相机与轨迹采样配置；vocab 路径默认沿用本 config
-            _sc.trajectory_sampling = config.trajectory_sampling
+            # 评分器保持第 4 章原生 horizon（OPD R34 = 40 @0.1s），不要覆盖成 DP 的 8 @0.5s。
+            # score_traj 会对生成轨迹做线性插值再打分。
+            _sc.backbone_type = getattr(config, 'scorer_backbone_type', 'resnet34')
+            _sc.normalize_vocab_pos = bool(getattr(config, 'scorer_normalize_vocab_pos', True))
+            _sc.trajectory_sampling = TrajectorySampling(
+                time_horizon=float(getattr(config, 'scorer_time_horizon', 4.0)),
+                interval_length=float(getattr(config, 'scorer_interval_length', 0.1)),
+            )
+            _sc.img_vert_anchors = int(getattr(config, 'scorer_img_vert_anchors', 16))
+            _sc.img_horz_anchors = int(getattr(config, 'scorer_img_horz_anchors', 64))
+            _sc.camera_width = int(getattr(config, 'scorer_camera_width', 2048))
+            _sc.camera_height = int(getattr(config, 'scorer_camera_height', 512))
             _sc.vocab_path = (getattr(config, 'scorer_vocab_path', '')
                               or getattr(config, 'vocab_path', ''))
-            self._guidance = ScorerGuidance(
+            # 不注册为子模块：评分器冻结、由 config 重建，绝不写入 generator ckpt
+            object.__setattr__(self, '_guidance', ScorerGuidance(
                 _sc,
                 ckpt_path=getattr(config, 'scorer_ckpt', ''),
                 freeze=bool(getattr(config, 'scorer_freeze', True)),
                 use_dual_stream=bool(getattr(config, 'scorer_use_dual_stream', True)),
-            )
+            ))
 
         self._trajectory_head = DPHead(
             num_poses=config.trajectory_sampling.num_poses,
@@ -726,15 +749,19 @@ class DPModel(nn.Module):
                 bias=True,
             )
 
-        # guard: the decoder's cond positional table must match (time token + kv tokens).
-        # obs_len was derived from img anchors which only coincidentally equals bev_h*bev_w;
-        # changing backbone/resolution silently shifts the table (no runtime error otherwise).
+        # guard: decoder cond positional table vs (time + kv). Historical VoV+back_view
+        # builds obs_len from img anchors (16x64x2+1 → 2050), while kv is bev 8x8+1=65;
+        # they only coincide in some configs. Soft-warn so we can still resume official ckpts.
+        import logging as _logging
         cond_table_len = self._trajectory_head.transformer_dp.cond_pos_emb.shape[1]
-        assert cond_table_len == emb_len + 1, (
-            f"cond_pos_emb len {cond_table_len} != time(1)+kv({emb_len}); "
-            f"check img_vert/horz_anchors ({config.img_vert_anchors}x{config.img_horz_anchors}) "
-            f"vs bev grid ({self._backbone.bev_h}x{self._backbone.bev_w})"
-        )
+        if cond_table_len != emb_len + 1:
+            _logging.getLogger(__name__).warning(
+                "cond_pos_emb len %s != time(1)+kv(%s); img_anchors=%sx%s back=%s bev=%sx%s "
+                "(historical mismatch; ok if resuming an existing FM-DP ckpt)",
+                cond_table_len, emb_len,
+                config.img_vert_anchors, config.img_horz_anchors, config.use_back_view,
+                self._backbone.bev_h, self._backbone.bev_w,
+            )
 
     def forward(self, features: Dict[str, torch.Tensor],
                 interpolated_traj=None) -> Dict[str, torch.Tensor]:

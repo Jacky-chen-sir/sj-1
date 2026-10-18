@@ -78,6 +78,8 @@ fm_lattice_k_set="${FM_LATTICE_K_SET:-[2,3,4,5,8,10,20]}"
 # 开启前必须先把第 4 章的评分器训好，并用 SCORER_CKPT 指过去。
 scorer_guidance="${SCORER_GUIDANCE:-false}"
 scorer_ckpt="${SCORER_CKPT:-}"
+# 第 4 章评分器词表（OPD R34 默认 8192）；空则沿用生成器 vocab_path（通常不对）
+scorer_vocab_path="${SCORER_VOCAB_PATH:-${NAVSIM_DEVKIT_ROOT}/traj_final/test_8192_kmeans.npy}"
 # A：评分引导（用可微评分头的分数把提案推向高分区）
 lambda_score="${LAMBDA_SCORE:-0.0}"
 score_temperature="${SCORE_TEMPERATURE:-1.0}"
@@ -143,6 +145,8 @@ echo "      freeze_except_traj_head=${freeze_except_traj_head} lr_mult_backbone=
 echo "      fm_aux=${fm_traj_aux_weight}(pos=${fm_traj_aux_pos_weight},head=${fm_traj_aux_head_weight}) kin=${fm_kin_weight}"
 echo "      lattice_t=${fm_lattice_t_prob} k_set=${fm_lattice_k_set} clip=${fm_clip_sample}"
 echo "      self_consistency_p=${fm_self_consistency_p}(max_steps=${fm_sc_max_steps},warmup=${fm_sc_warmup_steps}) self_cond=${fm_self_conditioning}"
+echo "      scorer_guidance=${scorer_guidance} ckpt=${scorer_ckpt:-none}"
+echo "      λ_score=${lambda_score} λ_safe=${lambda_safe_feas} λ_comfort=${lambda_comfort_div} t_min=${guidance_t_min} n=${guidance_samples}"
 
 python "${NAVSIM_DEVKIT_ROOT}/navsim/planning/script/run_training_dense.py" \
   --config-name competition_training \
@@ -181,7 +185,8 @@ python "${NAVSIM_DEVKIT_ROOT}/navsim/planning/script/run_training_dense.py" \
   ++agent.config.fm_sc_warmup_steps="${fm_sc_warmup_steps}" \
   ++agent.config.fm_self_conditioning="${fm_self_conditioning}" \
   ++agent.config.scorer_guidance="${scorer_guidance}" \
-  ++agent.config.scorer_ckpt="${scorer_ckpt}" \
+  ++agent.config.scorer_ckpt="'${scorer_ckpt}'" \
+  ++agent.config.scorer_vocab_path="'${scorer_vocab_path}'" \
   ++agent.config.lambda_score="${lambda_score}" \
   ++agent.config.score_temperature="${score_temperature}" \
   ++agent.config.lambda_safe_feas="${lambda_safe_feas}" \

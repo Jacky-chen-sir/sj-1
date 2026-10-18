@@ -80,19 +80,43 @@ class ScorerGuidance(nn.Module):
 
     # ------------------------------------------------------------------
     def _load_ckpt(self, path: str) -> None:
-        """加载评分器权重。兼容 Lightning 的 `state_dict` 外层包装与 `model.` 前缀。"""
+        """加载评分器权重。
+
+        兼容：
+          - Lightning `state_dict` 外层包装
+          - 第 4 章 OPD / GTRSAug：`agent.model.student.model.*`（优先学生，忽略 teacher）
+          - 普通 `model.*` / 裸 HydraModel 键
+        """
         sd = torch.load(path, map_location='cpu')
         for key in ('state_dict', 'model', 'model_state_dict'):
             if isinstance(sd, dict) and key in sd:
                 sd = sd[key]
                 break
-        sd = {k[len('model.'):]: v for k, v in sd.items() if k.startswith('model.')} or sd
-        missing, unexpected = self.scorer.load_state_dict(sd, strict=False)
+        if not isinstance(sd, dict):
+            raise TypeError(f'ScorerGuidance: unexpected ckpt type {type(sd)} from {path}')
+
+        prefixes = (
+            'agent.model.student.model.',
+            'model.student.model.',
+            'student.model.',
+            'agent.model.',
+            'model.',
+        )
+        stripped = None
+        for pref in prefixes:
+            hit = {k[len(pref):]: v for k, v in sd.items() if k.startswith(pref)}
+            if hit:
+                stripped = hit
+                logger.info(f'ScorerGuidance: stripped prefix {pref!r} ({len(hit)} keys)')
+                break
+        if stripped is None:
+            stripped = sd
+
+        missing, unexpected = self.scorer.load_state_dict(stripped, strict=False)
         if missing:
             logger.warning(f'ScorerGuidance: 缺 {len(missing)} 个键，前 5 个: {missing[:5]}')
         if unexpected:
             logger.warning(f'ScorerGuidance: 多 {len(unexpected)} 个键，前 5 个: {unexpected[:5]}')
-
     # ------------------------------------------------------------------
     @staticmethod
     def adapt_features(features: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
@@ -115,6 +139,12 @@ class ScorerGuidance(nn.Module):
         return out
 
     # ------------------------------------------------------------------
+    def _ensure_device(self, ref: torch.Tensor) -> None:
+        """评分器用不注册子模块的方式挂上（避免进 ckpt），Lightning 不会自动 .to(GPU)。"""
+        p = next(self.scorer.parameters(), None)
+        if p is not None and p.device != ref.device:
+            self.scorer.to(ref.device)
+
     def encode_scene(self, features: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """跑一次评分器骨干，得到 BEV 特征（keyval）与状态编码。
 
@@ -125,14 +155,24 @@ class ScorerGuidance(nn.Module):
         if isinstance(camera_feature, list):
             camera_feature = camera_feature[-1]
         status_feature = f['status_feature'][0]
+        self._ensure_device(camera_feature)
 
         sc = self.scorer
         img_feat_dict = sc.img_feat_blc_dict(camera_feature, masks=None, return_class_token=True)
         keyval = img_feat_dict['avg_feat'] + sc._keyval_embedding.weight[None, ...]
         status_encoding = sc._status_encoding(status_feature)
         return {'keyval': keyval, 'status_encoding': status_encoding}
-
     # ------------------------------------------------------------------
+    @staticmethod
+    def resample_traj(traj_abs: torch.Tensor, target_h: int) -> torch.Tensor:
+        """把 [B, N, H, 3] 线性插值到评分器原生 horizon（如 DP 的 8 → OPD 的 40）。"""
+        B, N, H, C = traj_abs.shape
+        if H == target_h:
+            return traj_abs
+        x = traj_abs.permute(0, 1, 3, 2).reshape(B * N, C, H)
+        y = F.interpolate(x, size=target_h, mode='linear', align_corners=True)
+        return y.reshape(B, N, C, target_h).permute(0, 1, 3, 2).contiguous()
+
     def score_traj(self, scene: Dict[str, torch.Tensor],
                    traj_abs: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """对 [B, N, H, 3] 的**绝对**轨迹打分。
@@ -142,25 +182,30 @@ class ScorerGuidance(nn.Module):
 
         走的通路与 `HydraTrajHead.forward` 的 `dp_preds` 分支完全一致：
             pos_embed → encoder → transformer(kv) → +status → 逐头线性 → fused
+
+        H 可与评分器原生 horizon 不同：会先线性插值到 `self._num_poses`（第 3 章 FM
+        默认 8 点、第 4 章 OPD 默认 40 点）。
         """
         head = self.scorer._trajectory_head
         B, N, H, C = traj_abs.shape
         assert C == 3, f'轨迹最后一维应为 (x, y, θ)，得到 {C}'
-        assert H == self._num_poses, f'轨迹长度应为 {self._num_poses}，得到 {H}'
+        traj_abs = self.resample_traj(traj_abs, self._num_poses)
+        H = self._num_poses
 
-        flat = traj_abs.reshape(B * N, H, C).reshape(B * N, -1)
+        # 与 HydraTrajHead.forward_refinement_infer_expansion 同形：[B, N, H*3]
+        flat = traj_abs.reshape(B, N, -1)
         emb = head.pos_embed(flat)
-        emb = head.encoder(emb)
+        # normalize_vocab_pos=True 时才有 MemoryEffTransformer encoder（OPD 默认开）
+        if getattr(head, 'encoder', None) is not None:
+            emb = head.encoder(emb)
 
         keyval = scene['keyval']
-        tr_out = head.transformer(emb.view(B, N, -1), keyval)          # [B, N, C]
+        tr_out = head.transformer(emb, keyval)                          # [B, N, C]
         dist_status = tr_out + scene['status_encoding'].unsqueeze(1)    # [B, N, C]
-
         head_out = {k: h(dist_status).squeeze(-1) for k, h in head.heads.items()}
         score = fused_coarse_score(
             head_out, self.scorer._config, safe=True, dual_stream=self._dual_stream)
         return score, head_out
-
     # ------------------------------------------------------------------
     def safety_product(self, head_out: Dict[str, torch.Tensor]) -> torch.Tensor:
         """四项安全因子的概率乘积 `[B, N]`——EPDMS 的乘性部分。

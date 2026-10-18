@@ -249,8 +249,16 @@ class DPConfig(TransfuserConfig):
     # 评分器检查点（第 4 章训练好的学生模型）。为空则用随机初始化——只用于跑通流程，
     # 正式训练必须给真实 ckpt，否则引导信号没有意义。
     scorer_ckpt: str = ''
-    # 评分器配置：默认从 HydraConfigAug() 构造，这里只需覆盖与 ckpt 不一致的字段。
+    # 评分器配置：默认对齐 OPD R34（resnet34 / 40 poses / 8192 vocab）。
     scorer_vocab_path: str = ''          # 空则沿用本 config 的 vocab_path
+    scorer_backbone_type: str = 'resnet34'
+    scorer_normalize_vocab_pos: bool = True  # OPD/DriveSuprim 默认 True；否则无 encoder
+    scorer_time_horizon: float = 4.0
+    scorer_interval_length: float = 0.1  # → 40 poses；DP 生成 8 点时会插值到此
+    scorer_img_vert_anchors: int = 16
+    scorer_img_horz_anchors: int = 64
+    scorer_camera_width: int = 2048
+    scorer_camera_height: int = 512
     scorer_use_dual_stream: bool = True  # 用论文式 (4-8) 的双流准则（推荐）
     scorer_freeze: bool = True           # 冻结评分器参数；梯度仍穿过它回传到生成器
 
