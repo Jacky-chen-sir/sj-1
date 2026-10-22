@@ -59,9 +59,9 @@ FORCE_RERUN=1 DP_EVAL_ZERO_NOISE=true EXP_NAME=ch3_df/p0_zero CKPT=$CKPT \
 |---|---|---|
 | `P0_first` | `proposals[0]` | 现状，且**重复 3 次**以估计方差 |
 | `P0_medoid` | 100 条的 medoid（到其余样本距离和最小） | 降方差 |
-| `P0_zero` | 零噪声确定性路径（先验均值起点） | 确定性输出 |
+| `P0_zero` | 零噪声确定性路径（先验零起点；**不是**条件均值） | 确定性输出 |
 
-同时用官方 DP（DDPM）ckpt 跑一次 `first`，确认基线 0.7305。
+同时用官方 DP（DDPM）ckpt 跑一次 `first`，确认基线 0.7305（已纳入一键脚本，`RUN_OFFICIAL=0` 可跳过）。
 
 **判据**：
 - 若 `medoid` 或 `zero` 比 `first` 高 > 0.01 → 推断退化是本 chapter 的核心问题，进入 Phase 1。
@@ -80,10 +80,14 @@ CKPT=$NAVSIM_EXP_ROOT/train_dp_official_fm_joint/epoch=18-step=81776.ckpt \
 - 三档使用互不冲突的 `EXP_NAME`（`ch3_df/p0_*`）；
 - 统一 `FM_SELF_CONDITIONING=false`（与 ep18 对齐）；
 - `first` / `zero` 用 `num_proposals=1`，`medoid` 用 100；
+  ⚠ `first` 的单提案**不等于**「100 条取第 0 条」（RNG 按 `B×P` 排布），
+  与历史 0.7380 的比较是分布层面的；增益接近判据时再补 100 提案的配对确认；
+- **每档显式 seed**（`p0_first_i` 用 1001/1002/1003）——Lightning 缺省固定 seed=0，
+  不区分 seed 的重复评测会抽出同一条轨迹，方差被估成 0；
 - 每档独立 `SUBSCORE_PATH`，避免互相覆盖 pickle；
-- 跑完调用 `summarize_phase0.py` 出表。
-
-> 官方 DDPM `first` 确认 0.7305 尚未纳入本脚本，需另跑（`USE_FM=false` + 官方 ckpt）。
+- 官方 DDPM 对照 `p0_official_first`（`USE_FM=false`，路径 `OFFICIAL_CKPT`，默认
+  `/home/ws/navsim_workspace/GTRS_official/data/models/gtrs_dp_model.ckpt`）；
+- 跑完调用 `summarize_phase0.py` 出表（官方对照单列，不计入 FM first 的均值/标准差）。
 
 ### Phase 1 — 中心一致性训练（Phase 0 有效才跑）
 

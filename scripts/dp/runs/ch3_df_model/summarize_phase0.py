@@ -85,8 +85,10 @@ def main():
         s = f'{r["score"]:.4f}' if r['score'] is not None else 'N/A'
         print(f'{r["tag"]:28s} {s:>10s}  {r["mode"]}')
 
-    # first 的均值 ± 标准差
-    firsts = [r['score'] for r in records if 'first' in r['tag'] and r['score'] is not None]
+    # first 的均值 ± 标准差（只统计 FM-DP；官方 DDPM 对照不参与）
+    firsts = [r['score'] for r in records
+              if 'first' in r['tag'] and 'official' not in r['tag']
+              and r['score'] is not None]
     if len(firsts) >= 2:
         print(f'\nfirst（n={len(firsts)}）: mean={statistics.mean(firsts):.4f} '
               f'std={statistics.stdev(firsts):.4f} '
@@ -94,7 +96,19 @@ def main():
     elif len(firsts) == 1:
         print(f'\nfirst 只有 1 次，无法估计方差；建议补跑 2 次。')
 
-    # 与 first 均值的差
+    # 官方 DDPM 对照 vs FM first 均值
+    officials = [r['score'] for r in records
+                 if 'official' in r['tag'] and r['score'] is not None]
+    if officials and firsts:
+        base = statistics.mean(firsts)
+        print('\n官方 DDPM 对照：')
+        for r in records:
+            if 'official' not in r['tag'] or r['score'] is None:
+                continue
+            print(f'  {r["tag"]:26s} {r["score"]:.4f}（相对 FM first {base:.4f}：'
+                  f'{r["score"] - base:+.4f}）')
+
+    # 与 first 均值的差（FM 各档）
     if firsts:
         base = statistics.mean(firsts)
         print('\n相对 first 均值：')

@@ -32,17 +32,21 @@ BS="${BS:-8}"
 WORKERS="${WORKERS:-8}"
 DRY_RUN="${DRY_RUN:-0}"
 SKIP_EVAL="${SKIP_EVAL:-0}"
+# 官方 GTRS-DP（DDPM）对照：确认 0.7305 的自复现口径。设 RUN_OFFICIAL=0 跳过。
+OFFICIAL_CKPT="${OFFICIAL_CKPT:-/home/ws/navsim_workspace/GTRS_official/data/models/gtrs_dp_model.ckpt}"
+RUN_OFFICIAL="${RUN_OFFICIAL:-1}"
 
 run_one() {
-  local tag="$1"; local agg="$2"; local zero="$3"; local nprop="${4:-}"
+  local tag="$1"; local agg="$2"; local zero="$3"; local nprop="${4:-}"; local seed="${5:-0}"
+  local use_fm="${USE_FM:-true}"
   local subscore="$NAVSIM_EXP_ROOT/$REL/$tag/proposals.pkl"
   echo
   echo "=============================================================="
-  echo "[PHASE0] $tag  agg=$agg zero=$zero self_cond=$FM_SELF_CONDITIONING nprop=${nprop:-<default>}"
+  echo "[PHASE0] $tag  agg=$agg zero=$zero self_cond=$FM_SELF_CONDITIONING nprop=${nprop:-<default>} seed=$seed use_fm=$use_fm"
   echo "=============================================================="
   if [ "$DRY_RUN" = "1" ]; then
     echo "DRY_RUN: CKPT=$CKPT EXP_NAME=$REL/$tag FORCE_RERUN=1 \\"
-    echo "         DP_PROPOSAL_AGG=$agg DP_EVAL_ZERO_NOISE=$zero \\"
+    echo "         DP_PROPOSAL_AGG=$agg DP_EVAL_ZERO_NOISE=$zero SEED=$seed USE_FM=$use_fm \\"
     echo "         FM_SELF_CONDITIONING=$FM_SELF_CONDITIONING FM_CLIP_SAMPLE=true \\"
     echo "         FM_NUM_INFERENCE_STEPS=$FM_STEPS GPU=$GPU BS=$BS WORKERS=$WORKERS \\"
     echo "         SUBSCORE_PATH=$subscore ${nprop:+NUM_PROPOSALS=$nprop }\\"
@@ -52,6 +56,7 @@ run_one() {
   mkdir -p "$(dirname "$subscore")"
   CKPT="$CKPT" EXP_NAME="$REL/$tag" FORCE_RERUN=1 \
   DP_PROPOSAL_AGG="$agg" DP_EVAL_ZERO_NOISE="$zero" \
+  SEED="$seed" USE_FM="$use_fm" \
   FM_SELF_CONDITIONING="$FM_SELF_CONDITIONING" FM_CLIP_SAMPLE=true \
   FM_NUM_INFERENCE_STEPS="$FM_STEPS" GPU="$GPU" BS="$BS" WORKERS="$WORKERS" \
   SUBSCORE_PATH="$subscore" \
@@ -59,16 +64,33 @@ run_one() {
     bash "$EVAL"
 }
 
-# first ×N（估方差）。只用 proposals[0] → num_proposals=1 与 100 取[0] 等价，省算力。
+# first ×N（估方差）。nprop=1 是"单样本推断"这一臂的定义，省去另外 99 条的计算；
+# 注意它**不等价**于"100 条取第 0 条"：噪声按 (B*P, H, A) 行优先生成，P 不同则
+# 每个场景拿到的随机数不同。所以与历史 0.7380 的比较是分布层面的，不是逐场景配对。
+# 若 medoid/zero 的增益接近判据（>0.01），再用 NUM_PROPOSALS=100 补一组配对确认。
+# seed 必须显式区分：Lightning 缺省固定 seed=0，否则 N 次会抽出同一条轨迹。
 for i in $(seq 1 "$N_FIRST"); do
-  run_one "p0_first_$i" first false 1
+  run_one "p0_first_$i" first false 1 "$((1000 + i))"
 done
 
 # medoid：需要多样本
-run_one "p0_medoid" medoid false 100
+run_one "p0_medoid" medoid false 100 2000
 
 # 零噪声（评测脚本也会自动 num_proposals=1；此处显式写出）
-run_one "p0_zero" first true 1
+run_one "p0_zero" first true 1 3000
+
+# 官方 DDPM 对照（历史 0.7305）。与 p0_first_1 同 seed，便于配对比较。
+if [ "$RUN_OFFICIAL" = "1" ]; then
+  if [ -f "$OFFICIAL_CKPT" ] || [ "$DRY_RUN" = "1" ]; then
+    CKPT="$OFFICIAL_CKPT" USE_FM=false \
+      run_one "p0_official_first" first false 1 1001
+  else
+    echo "[WARN] 官方 ckpt 不存在，跳过官方对照: $OFFICIAL_CKPT"
+    echo "       可设 OFFICIAL_CKPT=... 或 RUN_OFFICIAL=0"
+  fi
+else
+  echo "[INFO] RUN_OFFICIAL=0，跳过官方 DDPM 对照"
+fi
 
 echo
 echo "=============================================================="

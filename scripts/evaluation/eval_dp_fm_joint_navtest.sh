@@ -40,6 +40,10 @@ dp_zero_noise="${DP_EVAL_ZERO_NOISE:-false}"
 # 提案聚合：first（默认）| medoid。由 agent_lightning_module 读环境变量。
 dp_proposal_agg="${DP_PROPOSAL_AGG:-first}"
 export DP_PROPOSAL_AGG="${dp_proposal_agg}"
+# Lightning 2.x 的 Trainer(seed_everything=True) 用 PL_GLOBAL_SEED，缺省固定为 0。
+# 不显式区分 seed 时，同一配置重复评测会抽出完全相同的提案，方差被估成 0。
+eval_seed="${SEED:-0}"
+export PL_GLOBAL_SEED="${eval_seed}"
 # 扩散基线对照组：USE_FM=false 时按 DDPM 口径评测（默认 true，与改动前一致）
 use_fm="${USE_FM:-true}"
 # 必须与训练时一致：自条件改变 input_emb 的 in_features，不传就会 size mismatch 直接抛异常。
@@ -121,7 +125,7 @@ echo "[RUN] FM joint DP navtest evaluation"
 echo "      ckpt=${ckpt}"
 echo "      split=${split} gpu=${gpu} bs=${batch_size} workers=${workers}"
 echo "      fm_steps=${fm_steps} self_cond=${fm_self_conditioning} clip=${fm_clip_sample}"
-echo "      agg=${dp_proposal_agg} zero_noise=${dp_zero_noise} num_proposals=${num_proposals:-<config>}"
+echo "      agg=${dp_proposal_agg} zero_noise=${dp_zero_noise} num_proposals=${num_proposals:-<config>} seed=${eval_seed}"
 echo "      subscore=${SUBSCORE_PATH}"
 echo "      experiment=${experiment_name}"
 
