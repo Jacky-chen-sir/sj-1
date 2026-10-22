@@ -11,7 +11,7 @@ DP 单独评测原本取 `proposals[0]`（100 条随机采样中的第一条）�
 
 1. **已有的 0.7305 / 0.7380 带有采样噪声**，不是模型的确定性输出；
 2. **另外 99 条提案被丢弃**；
-3. 只要换成“分布中心”，就可能免费涨分。
+3. 换成确定性路径或 medoid 是**待验证的提升假设**，不是已证结论。
 
 ## 1. 代码改动（已在 `sj-df_model` 落地）
 
@@ -44,6 +44,11 @@ FORCE_RERUN=1 DP_EVAL_ZERO_NOISE=true EXP_NAME=ch3_df/p0_zero CKPT=$CKPT \
   bash scripts/evaluation/eval_dp_fm_joint_navtest.sh
 ```
 
+## 1.5 与 `sj-opd` 分支的关系
+
+本分支的第三章主线**取代** `sj-opd` 上的「评价器引导 + 时间门控」线。
+`sj-opd` 的引导实验保留为独立对照，不进入第三章正文；论文里只保留一套第三章口径。
+
 ## 2. 实验计划
 
 ### Phase 0 — 推断方式对照（零训练，必跑）
@@ -53,8 +58,8 @@ FORCE_RERUN=1 DP_EVAL_ZERO_NOISE=true EXP_NAME=ch3_df/p0_zero CKPT=$CKPT \
 | ID | 推断 | 说明 |
 |---|---|---|
 | `P0_first` | `proposals[0]` | 现状，且**重复 3 次**以估计方差 |
-| `P0_medoid` | 100 条的中位数轨迹 | 降方差 |
-| `P0_zero` | 零噪声中心路径 | 确定性输出 |
+| `P0_medoid` | 100 条的 medoid（到其余样本距离和最小） | 降方差 |
+| `P0_zero` | 零噪声确定性路径（先验均值起点） | 确定性输出 |
 
 同时用官方 DP（DDPM）ckpt 跑一次 `first`，确认基线 0.7305。
 
@@ -63,6 +68,19 @@ FORCE_RERUN=1 DP_EVAL_ZERO_NOISE=true EXP_NAME=ch3_df/p0_zero CKPT=$CKPT \
 - 若三者接近 → 生成式模型的单样本已经足够好，转 Phase 3（换骨干）。
 
 **成本**：3–5 次评测，每次约数小时（纯推理），**不需要训练**。
+
+**一键执行**：
+
+```bash
+CKPT=$NAVSIM_EXP_ROOT/train_dp_official_fm_joint/epoch=18-step=81776.ckpt \
+  bash scripts/dp/runs/ch3_df_model/run_phase0.sh
+```
+
+脚本自动：
+- 三档使用互不冲突的 `EXP_NAME`（`ch3_df/p0_*`）；
+- 统一 `FM_SELF_CONDITIONING=false`（与 ep18 对齐）；
+- 零噪声档自动 `num_proposals=1`，避免 100 条重复轨迹；
+- 跑完调用 `summarize_phase0.py` 出表。
 
 ### Phase 1 — 中心一致性训练（Phase 0 有效才跑）
 

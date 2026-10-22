@@ -31,7 +31,7 @@ class DPConfig(TransfuserConfig):
     scheduler: str = 'default'
 
     num_proposals: int = 100
-    # 推理起点置零：走确定性“中心路径”，而不是随机采样一条。
+    # 推理起点置零：走确定性路径（先验均值起点），而不是随机采样一条。
     # 仅评测用；训练不受影响。
     dp_eval_zero_noise: bool = False
 

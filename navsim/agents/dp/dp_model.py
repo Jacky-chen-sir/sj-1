@@ -428,8 +428,8 @@ class DPHead(nn.Module):
 
             condition = kv.repeat_interleave(NUM_PROPOSALS, dim=0)
 
-            # 推理起点。默认为高斯噪声（随机采样一条轨迹）；置零时走确定性“中心路径”，
-            # 用分布中心代替单次随机样本（见第三章“确定性推断”）。
+            # 推理起点。默认为高斯噪声（随机采样一条轨迹）；置零时走确定性路径
+            # （先验均值起点），用固定起点代替每次不同的随机样本。是否更好是待验证假设。
             _shape = (B * NUM_PROPOSALS, HORIZON, ACTION_DIM)
             if bool(getattr(self.config, 'dp_eval_zero_noise', False)):
                 noise = torch.zeros(_shape, dtype=condition.dtype, device=condition.device)
