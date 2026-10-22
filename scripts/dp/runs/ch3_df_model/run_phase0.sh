@@ -34,36 +34,41 @@ DRY_RUN="${DRY_RUN:-0}"
 SKIP_EVAL="${SKIP_EVAL:-0}"
 
 run_one() {
-  local tag="$1"; local agg="$2"; local zero="$3"
+  local tag="$1"; local agg="$2"; local zero="$3"; local nprop="${4:-}"
+  local subscore="$NAVSIM_EXP_ROOT/$REL/$tag/proposals.pkl"
   echo
   echo "=============================================================="
-  echo "[PHASE0] $tag  agg=$agg zero=$zero self_cond=$FM_SELF_CONDITIONING"
+  echo "[PHASE0] $tag  agg=$agg zero=$zero self_cond=$FM_SELF_CONDITIONING nprop=${nprop:-<default>}"
   echo "=============================================================="
   if [ "$DRY_RUN" = "1" ]; then
     echo "DRY_RUN: CKPT=$CKPT EXP_NAME=$REL/$tag FORCE_RERUN=1 \\"
     echo "         DP_PROPOSAL_AGG=$agg DP_EVAL_ZERO_NOISE=$zero \\"
     echo "         FM_SELF_CONDITIONING=$FM_SELF_CONDITIONING FM_CLIP_SAMPLE=true \\"
     echo "         FM_NUM_INFERENCE_STEPS=$FM_STEPS GPU=$GPU BS=$BS WORKERS=$WORKERS \\"
+    echo "         SUBSCORE_PATH=$subscore ${nprop:+NUM_PROPOSALS=$nprop }\\"
     echo "         bash $EVAL"
     return 0
   fi
+  mkdir -p "$(dirname "$subscore")"
   CKPT="$CKPT" EXP_NAME="$REL/$tag" FORCE_RERUN=1 \
   DP_PROPOSAL_AGG="$agg" DP_EVAL_ZERO_NOISE="$zero" \
   FM_SELF_CONDITIONING="$FM_SELF_CONDITIONING" FM_CLIP_SAMPLE=true \
   FM_NUM_INFERENCE_STEPS="$FM_STEPS" GPU="$GPU" BS="$BS" WORKERS="$WORKERS" \
+  SUBSCORE_PATH="$subscore" \
+  ${nprop:+NUM_PROPOSALS="$nprop"} \
     bash "$EVAL"
 }
 
-# first ×N（估方差）
+# first ×N（估方差）。只用 proposals[0] → num_proposals=1 与 100 取[0] 等价，省算力。
 for i in $(seq 1 "$N_FIRST"); do
-  run_one "p0_first_$i" first false
+  run_one "p0_first_$i" first false 1
 done
 
-# medoid
-run_one "p0_medoid" medoid false
+# medoid：需要多样本
+run_one "p0_medoid" medoid false 100
 
-# 零噪声（脚本会自动 num_proposals=1）
-run_one "p0_zero" first true
+# 零噪声（评测脚本也会自动 num_proposals=1；此处显式写出）
+run_one "p0_zero" first true 1
 
 echo
 echo "=============================================================="

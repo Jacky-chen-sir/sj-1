@@ -18,7 +18,7 @@ DP 单独评测原本取 `proposals[0]`（100 条随机采样中的第一条）�
 | 文件 | 改动 |
 |---|---|
 | `dp_config.py` | 新增 `dp_eval_zero_noise`（推理起点置零） |
-| `dp_model.py` | 置零时用 `torch.zeros` 作为 ODE 起点，走确定性中心路径 |
+| `dp_model.py` | 置零时用 `torch.zeros` 作为 ODE 起点（确定性路径；≠条件均值） |
 | `agent_lightning_module.py` | `DP_PROPOSAL_AGG` 环境变量：`first`（默认）/ `medoid` |
 | `eval_dp_fm_joint_navtest.sh` | 暴露 `DP_EVAL_ZERO_NOISE` |
 
@@ -79,8 +79,11 @@ CKPT=$NAVSIM_EXP_ROOT/train_dp_official_fm_joint/epoch=18-step=81776.ckpt \
 脚本自动：
 - 三档使用互不冲突的 `EXP_NAME`（`ch3_df/p0_*`）；
 - 统一 `FM_SELF_CONDITIONING=false`（与 ep18 对齐）；
-- 零噪声档自动 `num_proposals=1`，避免 100 条重复轨迹；
+- `first` / `zero` 用 `num_proposals=1`，`medoid` 用 100；
+- 每档独立 `SUBSCORE_PATH`，避免互相覆盖 pickle；
 - 跑完调用 `summarize_phase0.py` 出表。
+
+> 官方 DDPM `first` 确认 0.7305 尚未纳入本脚本，需另跑（`USE_FM=false` + 官方 ckpt）。
 
 ### Phase 1 — 中心一致性训练（Phase 0 有效才跑）
 
