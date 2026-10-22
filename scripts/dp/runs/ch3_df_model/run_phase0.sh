@@ -54,6 +54,11 @@ run_one() {
     return 0
   fi
   mkdir -p "$(dirname "$subscore")"
+  # 记录本档配置，出表后可追溯（CSV 里不带 seed/agg）。
+  printf 'tag=%s\nseed=%s\nagg=%s\nzero_noise=%s\nnum_proposals=%s\nuse_fm=%s\nself_cond=%s\nfm_steps=%s\nckpt=%s\n' \
+    "$tag" "$seed" "$agg" "$zero" "${nprop:-<config>}" "$use_fm" \
+    "$FM_SELF_CONDITIONING" "$FM_STEPS" "$CKPT" \
+    > "$NAVSIM_EXP_ROOT/$REL/$tag/run_meta.txt"
   CKPT="$CKPT" EXP_NAME="$REL/$tag" FORCE_RERUN=1 \
   DP_PROPOSAL_AGG="$agg" DP_EVAL_ZERO_NOISE="$zero" \
   SEED="$seed" USE_FM="$use_fm" \
@@ -68,7 +73,7 @@ run_one() {
 # 注意它**不等价**于"100 条取第 0 条"：噪声按 (B*P, H, A) 行优先生成，P 不同则
 # 每个场景拿到的随机数不同。所以与历史 0.7380 的比较是分布层面的，不是逐场景配对。
 # 若 medoid/zero 的增益接近判据（>0.01），再用 NUM_PROPOSALS=100 补一组配对确认。
-# seed 必须显式区分：Lightning 缺省固定 seed=0，否则 N 次会抽出同一条轨迹。
+# seed 必须显式传：本入口不会自动 seed，不传则每次进程启动的 RNG 不同、结果不可复现。
 for i in $(seq 1 "$N_FIRST"); do
   run_one "p0_first_$i" first false 1 "$((1000 + i))"
 done
