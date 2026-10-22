@@ -49,7 +49,7 @@ run_one() {
     echo "         DP_PROPOSAL_AGG=$agg DP_EVAL_ZERO_NOISE=$zero SEED=$seed USE_FM=$use_fm \\"
     echo "         FM_SELF_CONDITIONING=$FM_SELF_CONDITIONING FM_CLIP_SAMPLE=true \\"
     echo "         FM_NUM_INFERENCE_STEPS=$FM_STEPS GPU=$GPU BS=$BS WORKERS=$WORKERS \\"
-    echo "         SUBSCORE_PATH=$subscore ${nprop:+NUM_PROPOSALS=$nprop }\\"
+    echo "         SUBSCORE_PATH=$subscore NUM_PROPOSALS=$nprop \\"
     echo "         bash $EVAL"
     return 0
   fi
@@ -59,13 +59,13 @@ run_one() {
     "$tag" "$seed" "$agg" "$zero" "${nprop:-<config>}" "$use_fm" \
     "$FM_SELF_CONDITIONING" "$FM_STEPS" "$CKPT" \
     > "$NAVSIM_EXP_ROOT/$REL/$tag/run_meta.txt"
+  # 勿用 ${nprop:+NUM_PROPOSALS="$nprop"} 接在 env 前缀——bash 会解析成独立命令。
   CKPT="$CKPT" EXP_NAME="$REL/$tag" FORCE_RERUN=1 \
   DP_PROPOSAL_AGG="$agg" DP_EVAL_ZERO_NOISE="$zero" \
   SEED="$seed" USE_FM="$use_fm" \
   FM_SELF_CONDITIONING="$FM_SELF_CONDITIONING" FM_CLIP_SAMPLE=true \
   FM_NUM_INFERENCE_STEPS="$FM_STEPS" GPU="$GPU" BS="$BS" WORKERS="$WORKERS" \
-  SUBSCORE_PATH="$subscore" \
-  ${nprop:+NUM_PROPOSALS="$nprop"} \
+  SUBSCORE_PATH="$subscore" NUM_PROPOSALS="$nprop" \
     bash "$EVAL"
 }
 
