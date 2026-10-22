@@ -37,12 +37,17 @@ fm_steps="${FM_NUM_INFERENCE_STEPS:-20}"
 ddpm_steps="${DDPM_NUM_INFERENCE_STEPS:-100}"
 # 推理起点置零（确定性中心路径）。与 DP_PROPOSAL_AGG 配合做第三章的推断对照。
 dp_zero_noise="${DP_EVAL_ZERO_NOISE:-false}"
+# 提案聚合：first（默认）| medoid。由 agent_lightning_module 读环境变量。
+dp_proposal_agg="${DP_PROPOSAL_AGG:-first}"
+export DP_PROPOSAL_AGG="${dp_proposal_agg}"
 # 扩散基线对照组：USE_FM=false 时按 DDPM 口径评测（默认 true，与改动前一致）
 use_fm="${USE_FM:-true}"
 # 必须与训练时一致：自条件改变 input_emb 的 in_features，不传就会 size mismatch 直接抛异常。
 # 裁剪也要带上，否则少步（K=2/3）评测会外推出离分布很远的增量。
 fm_self_conditioning="${FM_SELF_CONDITIONING:-true}"
 fm_clip_sample="${FM_CLIP_SAMPLE:-true}"
+# 零噪声路径只需 1 条提案（多条会完全相同）；其余模式默认跟 config（100）。
+num_proposals="${NUM_PROPOSALS:-}"
 # 步数扫描建议只取训练 K 集合里的值（默认 2/3/4/5/8/10/20），集合外的 K 属 OOD
 if [ -n "${FM_STEPS_SWEEP:-}" ]; then
   echo "[INFO] FM_STEPS_SWEEP=${FM_STEPS_SWEEP} — 逐个 K 跑，确认每个 K 都在训练的 k_set 内"
@@ -61,7 +66,17 @@ sensor_path="${OPENSCENE_DATA_ROOT}/sensor_blobs/test/test"
 ckpt_stem="$(basename "${ckpt}" .ckpt)"
 # Hydra treats '=' as override syntax; sanitize for experiment_name only.
 ckpt_tag="${ckpt_stem//=/-}"
-experiment_name="${EXP_NAME:-train_dp_official_fm_joint/navtest-${ckpt_tag}-fm${fm_steps}-b${batch_size}-w${workers}}"
+# 推断方式必须进默认目录名，否则 first/medoid/zero 会撞同一 CSV 被 SKIP。
+# Phase 0 仍建议显式 EXP_NAME=ch3_df/p0_*（见 runs/ch3_df_model/ISSUES.md）。
+_agg_tag=""
+_zero_tag=""
+if [ "${dp_proposal_agg}" != "first" ]; then
+  _agg_tag="-agg${dp_proposal_agg}"
+fi
+if [ "${dp_zero_noise}" = "true" ] || [ "${dp_zero_noise}" = "True" ] || [ "${dp_zero_noise}" = "1" ]; then
+  _zero_tag="-zero"
+fi
+experiment_name="${EXP_NAME:-train_dp_official_fm_joint/navtest-${ckpt_tag}-fm${fm_steps}${_zero_tag}${_agg_tag}-b${batch_size}-w${workers}}"
 
 mkdir -p "${NAVSIM_EXP_ROOT}/train_dp_official_fm_joint" "${NAVSIM_EXP_ROOT}/logs"
 EMPTY_DP_PREDS="${NAVSIM_EXP_ROOT}/train_dp_official_fm_joint/empty_dp_preds.pkl"
@@ -106,8 +121,20 @@ echo "[RUN] FM joint DP navtest evaluation"
 echo "      ckpt=${ckpt}"
 echo "      split=${split} gpu=${gpu} bs=${batch_size} workers=${workers}"
 echo "      fm_steps=${fm_steps} self_cond=${fm_self_conditioning} clip=${fm_clip_sample}"
+echo "      agg=${dp_proposal_agg} zero_noise=${dp_zero_noise} num_proposals=${num_proposals:-<config>}"
 echo "      subscore=${SUBSCORE_PATH}"
 echo "      experiment=${experiment_name}"
+
+_hydra_extra=()
+if [ -n "${num_proposals}" ]; then
+  _hydra_extra+=("++agent.config.num_proposals=${num_proposals}")
+fi
+# zero-noise 默认压成 1 条，避免 100 份相同轨迹；可用 NUM_PROPOSALS 覆盖。
+if { [ "${dp_zero_noise}" = "true" ] || [ "${dp_zero_noise}" = "True" ] || [ "${dp_zero_noise}" = "1" ]; } \
+   && [ -z "${num_proposals}" ]; then
+  _hydra_extra+=("++agent.config.num_proposals=1")
+  echo "      [auto] zero_noise → num_proposals=1"
+fi
 
 CUDA_VISIBLE_DEVICES="${gpu}" python "${NAVSIM_DEVKIT_ROOT}/navsim/planning/script/run_pdm_score_gpu_v2.py" \
   agent=gtrs_diffusion_policy \
@@ -128,6 +155,7 @@ CUDA_VISIBLE_DEVICES="${gpu}" python "${NAVSIM_DEVKIT_ROOT}/navsim/planning/scri
   ++agent.config.dp_eval_zero_noise="${dp_zero_noise}" \
   ++agent.config.fm_self_conditioning="${fm_self_conditioning}" \
   ++agent.config.fm_clip_sample="${fm_clip_sample}" \
+  "${_hydra_extra[@]}" \
   experiment_name="${experiment_name}" \
   +cache_path=null \
   metric_cache_path="${metric_cache_path}" \

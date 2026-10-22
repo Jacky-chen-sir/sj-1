@@ -22,17 +22,26 @@ DP 单独评测原本取 `proposals[0]`（100 条随机采样中的第一条）�
 | `agent_lightning_module.py` | `DP_PROPOSAL_AGG` 环境变量：`first`（默认）/ `medoid` |
 | `eval_dp_fm_joint_navtest.sh` | 暴露 `DP_EVAL_ZERO_NOISE` |
 
-**用法**：
+**用法**（必须带互不冲突的 `EXP_NAME`；细节与已知问题见同目录 `ISSUES.md`）：
 
 ```bash
-# 官方行为（取第 0 条）
-DP_PROPOSAL_AGG=first bash scripts/evaluation/eval_dp_fm_joint_navtest.sh
+CKPT=$NAVSIM_EXP_ROOT/train_dp_official_fm_joint/epoch=18-step=81776.ckpt
+# 与历史 0.7380 对齐时建议 FM_SELF_CONDITIONING=false；三档保持一致
+export FM_SELF_CONDITIONING=false
 
-# 中位数轨迹
-DP_PROPOSAL_AGG=medoid bash scripts/evaluation/eval_dp_fm_joint_navtest.sh
+# 官方行为（取第 0 条）×3 估方差
+for i in 1 2 3; do
+  FORCE_RERUN=1 DP_PROPOSAL_AGG=first EXP_NAME=ch3_df/p0_first_$i CKPT=$CKPT \
+    bash scripts/evaluation/eval_dp_fm_joint_navtest.sh
+done
 
-# 零噪声中心路径（确定性）
-DP_EVAL_ZERO_NOISE=true bash scripts/evaluation/eval_dp_fm_joint_navtest.sh
+# medoid（到其余提案距离和最小；不是坐标中位数）
+FORCE_RERUN=1 DP_PROPOSAL_AGG=medoid EXP_NAME=ch3_df/p0_medoid CKPT=$CKPT \
+  bash scripts/evaluation/eval_dp_fm_joint_navtest.sh
+
+# 零噪声确定性路径（脚本在 zero 时自动 num_proposals=1）
+FORCE_RERUN=1 DP_EVAL_ZERO_NOISE=true EXP_NAME=ch3_df/p0_zero CKPT=$CKPT \
+  bash scripts/evaluation/eval_dp_fm_joint_navtest.sh
 ```
 
 ## 2. 实验计划
