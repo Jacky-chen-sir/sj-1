@@ -428,11 +428,13 @@ class DPHead(nn.Module):
 
             condition = kv.repeat_interleave(NUM_PROPOSALS, dim=0)
 
-            noise = torch.randn(
-                size=(B * NUM_PROPOSALS, HORIZON, ACTION_DIM),
-                dtype=condition.dtype,
-                device=condition.device,
-            )
+            # 推理起点。默认为高斯噪声（随机采样一条轨迹）；置零时走确定性“中心路径”，
+            # 用分布中心代替单次随机样本（见第三章“确定性推断”）。
+            _shape = (B * NUM_PROPOSALS, HORIZON, ACTION_DIM)
+            if bool(getattr(self.config, 'dp_eval_zero_noise', False)):
+                noise = torch.zeros(_shape, dtype=condition.dtype, device=condition.device)
+            else:
+                noise = torch.randn(_shape, dtype=condition.dtype, device=condition.device)
 
             if self.use_flow_matching:
                 num_steps = self.fm_num_inference_steps

@@ -262,14 +262,25 @@ class AgentLightningModule(pl.LightningModule):
         # B, 100, 40, 3
         all_interpolated_proposals = torch.cat(all_interpolated_proposals, 0)
 
+        # 单样本推断的聚合方式（第三章）：
+        #   first  —— 官方行为：取第 0 条，等价于随机采样一条
+        #   medoid —— 取到其余提案距离和最小的那条，压低单样本方差
+        agg = os.getenv('DP_PROPOSAL_AGG', 'first').strip().lower()
+        if agg not in ('first', 'medoid'):
+            raise ValueError(f'Unknown DP_PROPOSAL_AGG={agg!r}; expected first|medoid')
+
         result = {}
         for idx, (proposals, interp_proposals, token) in enumerate(zip(
                 all_trajs.cpu().numpy(),
                 all_interpolated_proposals.cpu().numpy(),
                 tokens
         )):
-            # randomly choose a dp proposal
-            final_pose = proposals[0]
+            sel = 0
+            if agg == 'medoid' and len(proposals) > 1:
+                xy = interp_proposals[..., :2].astype(np.float32)       # [P, T, 2]
+                d2 = ((xy[:, None] - xy[None]) ** 2).sum(-1).mean(-1)   # [P, P]
+                sel = int(d2.sum(1).argmin())
+            final_pose = proposals[sel]
             if final_pose.shape[0] == 40:
                 interval_length = 0.1
             else:
