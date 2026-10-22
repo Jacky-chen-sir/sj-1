@@ -444,6 +444,14 @@ def main(cfg: DictConfig) -> None:
     """
 
     build_logger(cfg)
+    # 仅当调用方显式设置 PL_GLOBAL_SEED 时固定 RNG。
+    # 只 export 环境变量不够：本入口原先从不调用 seed_everything，SEED 不会生效。
+    _seed_env = os.getenv('PL_GLOBAL_SEED')
+    if _seed_env is not None and str(_seed_env).strip() != '':
+        _seed = int(_seed_env)
+        pl.seed_everything(_seed, workers=True)
+        logging.getLogger(__name__).info('PL seed_everything(%s) from PL_GLOBAL_SEED', _seed)
+
     combined = cfg.get('combined_inference', False)
 
     print(f'Combined inference: {combined}')

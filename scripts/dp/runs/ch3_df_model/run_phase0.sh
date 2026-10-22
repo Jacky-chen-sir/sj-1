@@ -79,11 +79,12 @@ run_one "p0_medoid" medoid false 100 2000
 # 零噪声（评测脚本也会自动 num_proposals=1；此处显式写出）
 run_one "p0_zero" first true 1 3000
 
-# 官方 DDPM 对照（历史 0.7305）。与 p0_first_1 同 seed，便于配对比较。
+# 官方 DDPM 对照（历史 0.7305）。用 100 提案取 [0]，与出 0.7305 时口径一致；
+# 与 p0_first_1 同 seed，便于和 FM 单提案臂对照（注意 nprop 不同，非逐场景配对）。
 if [ "$RUN_OFFICIAL" = "1" ]; then
   if [ -f "$OFFICIAL_CKPT" ] || [ "$DRY_RUN" = "1" ]; then
     CKPT="$OFFICIAL_CKPT" USE_FM=false \
-      run_one "p0_official_first" first false 1 1001
+      run_one "p0_official_first" first false 100 1001
   else
     echo "[WARN] 官方 ckpt 不存在，跳过官方对照: $OFFICIAL_CKPT"
     echo "       可设 OFFICIAL_CKPT=... 或 RUN_OFFICIAL=0"

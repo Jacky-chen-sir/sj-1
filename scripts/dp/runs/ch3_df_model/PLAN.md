@@ -82,8 +82,8 @@ CKPT=$NAVSIM_EXP_ROOT/train_dp_official_fm_joint/epoch=18-step=81776.ckpt \
 - `first` / `zero` 用 `num_proposals=1`，`medoid` 用 100；
   ⚠ `first` 的单提案**不等于**「100 条取第 0 条」（RNG 按 `B×P` 排布），
   与历史 0.7380 的比较是分布层面的；增益接近判据时再补 100 提案的配对确认；
-- **每档显式 seed**（`p0_first_i` 用 1001/1002/1003）——Lightning 缺省固定 seed=0，
-  不区分 seed 的重复评测会抽出同一条轨迹，方差被估成 0；
+- **每档显式 seed**（`p0_first_i` 用 1001/1002/1003）→ `PL_GLOBAL_SEED`，
+  并由 `run_pdm_score_gpu_v2` 调用 `pl.seed_everything`（只 export 不够）；
 - 每档独立 `SUBSCORE_PATH`，避免互相覆盖 pickle；
 - 官方 DDPM 对照 `p0_official_first`（`USE_FM=false`，路径 `OFFICIAL_CKPT`，默认
   `/home/ws/navsim_workspace/GTRS_official/data/models/gtrs_dp_model.ckpt`）；
