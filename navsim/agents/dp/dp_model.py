@@ -293,6 +293,10 @@ class DPHead(nn.Module):
         self.fm_sc_target_clip = float(getattr(config, 'fm_sc_target_clip', 6.0))
         # 运动学（增量的一/二阶差分）损失权重
         self.fm_kin_weight = float(getattr(config, 'fm_kin_weight', 0.0))
+        # 中心一致性：零噪声 Euler 路径 → 与 GT 的 drift/heading（Phase 1）
+        self.fm_center_weight = float(getattr(config, 'fm_center_weight', 0.0))
+        self.fm_center_steps = int(getattr(config, 'fm_center_steps', 4))
+        self.fm_center_p = float(getattr(config, 'fm_center_p', 1.0))
         # 纯 Python 计数器（不是 buffer，不进 state_dict，resume 后重新 warmup）
         self._sc_calls = 0
 
@@ -563,6 +567,34 @@ class DPHead(nn.Module):
                     })
                     if kin_loss is not None:
                         extras['fm_kin_loss'] = kin_loss.detach()
+
+            # 中心一致性（Phase 1）：从 x_T=0 做短 Euler，对还原增量施 drift+heading。
+            # 与推理 dp_eval_zero_noise 同起点；步数用 fm_center_steps（默认 4）控算力。
+            if (self.fm_center_weight > 0.0
+                    and bool(torch.rand((), device=device) < self.fm_center_p)):
+                n_c = max(1, int(self.fm_center_steps))
+                dt_c = 1.0 / float(n_c)
+                x_c = torch.zeros_like(x1)
+                self_cond_c = None
+                for i_c in range(n_c):
+                    t_val_c = 1.0 - i_c * dt_c
+                    t01_c = torch.full((B,), t_val_c, dtype=x1.dtype, device=device)
+                    v_c = self.transformer_dp(
+                        x_c, self._fm_time_for_transformer(t01_c), kv, self_cond=self_cond_c)
+                    v_c = self._fm_clip_velocity(x_c, t01_c, v_c)
+                    if self.fm_self_conditioning:
+                        self_cond_c = self._fm_x1_pred(x_c, t01_c, v_c).view(B, -1)
+                    x_c = x_c + v_c * dt_c
+                resid_c = x_c[..., :2] - x1[..., :2]
+                drift_c = resid_c.cumsum(dim=1)
+                pos_c = F.smooth_l1_loss(drift_c, torch.zeros_like(drift_c))
+                n_c_pred = x_c[..., 2:4]
+                n_c_pred = n_c_pred / n_c_pred.norm(dim=-1, keepdim=True).clamp_min(1e-4)
+                head_c = (1.0 - (n_c_pred * x1[..., 2:4]).sum(-1)).mean()
+                center_loss = (self.fm_traj_aux_pos_weight * pos_c
+                               + self.fm_traj_aux_head_weight * head_c)
+                fm_loss = fm_loss + self.fm_center_weight * center_loss
+                extras['fm_center_loss'] = center_loss.detach()
 
             # ==============================================================
             # 创新点 A/B：评价器引导的生成（论文 3.4.7 / 3.5.5 节）

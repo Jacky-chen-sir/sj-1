@@ -96,6 +96,13 @@ class DPConfig(TransfuserConfig):
     fm_self_conditioning: bool = True
     fm_self_cond_p: float = 0.5
 
+    # —— 中心一致性（Phase 1）：对「零噪声起点」Euler 还原轨迹施加与 traj_aux 同口径监督 ——
+    # 推理时 dp_eval_zero_noise 走 x_T=0；训练时把这条确定性路径也拉向 GT，使中心本身是好解。
+    # 0 = 关闭（P1_base）；>0 开启（P1_center）。步数默认 4 以控制算力（推理仍可用 K=20）。
+    fm_center_weight: float = 0.0
+    fm_center_steps: int = 4
+    fm_center_p: float = 1.0
+
     seq_len: int = 2
     trajectory_imi_weight: float = 1.0
     trajectory_pdm_weight = {

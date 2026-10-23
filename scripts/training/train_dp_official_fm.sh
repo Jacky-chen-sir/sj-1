@@ -109,6 +109,10 @@ fm_sc_max_steps="${FM_SC_MAX_STEPS:-4}"
 fm_sc_warmup_steps="${FM_SC_WARMUP_STEPS:-2000}"
 # 自条件：input_emb 会被零填充扩列，可以直接从旧 ckpt 续训
 fm_self_conditioning="${FM_SELF_CONDITIONING:-true}"
+# 中心一致性（Phase 1）：零噪声 Euler 路径监督；0=关
+fm_center_weight="${FM_CENTER_WEIGHT:-0.0}"
+fm_center_steps="${FM_CENTER_STEPS:-4}"
+fm_center_p="${FM_CENTER_P:-1.0}"
 
 if [ -n "${RESUME_CKPT}" ]; then
   if [ ! -f "${RESUME_CKPT}" ]; then
@@ -153,6 +157,7 @@ echo "      freeze_except_traj_head=${freeze_except_traj_head} lr_mult_backbone=
 echo "      fm_aux=${fm_traj_aux_weight}(pos=${fm_traj_aux_pos_weight},head=${fm_traj_aux_head_weight}) kin=${fm_kin_weight}"
 echo "      lattice_t=${fm_lattice_t_prob} k_set=${fm_lattice_k_set} clip=${fm_clip_sample}"
 echo "      self_consistency_p=${fm_self_consistency_p}(max_steps=${fm_sc_max_steps},warmup=${fm_sc_warmup_steps}) self_cond=${fm_self_conditioning}"
+echo "      center_weight=${fm_center_weight} steps=${fm_center_steps} p=${fm_center_p}"
 echo "      scorer_guidance=${scorer_guidance} ckpt=${scorer_ckpt:-none}"
 echo "      λ_score=${lambda_score} λ_safe=${lambda_safe_feas} λ_comfort=${lambda_comfort_div} t∈[${guidance_t_floor},${guidance_t_min}] warmup=${guidance_warmup_steps} n=${guidance_samples}"
 
@@ -192,6 +197,9 @@ python "${NAVSIM_DEVKIT_ROOT}/navsim/planning/script/run_training_dense.py" \
   ++agent.config.fm_sc_max_steps="${fm_sc_max_steps}" \
   ++agent.config.fm_sc_warmup_steps="${fm_sc_warmup_steps}" \
   ++agent.config.fm_self_conditioning="${fm_self_conditioning}" \
+  ++agent.config.fm_center_weight="${fm_center_weight}" \
+  ++agent.config.fm_center_steps="${fm_center_steps}" \
+  ++agent.config.fm_center_p="${fm_center_p}" \
   ++agent.config.scorer_guidance="${scorer_guidance}" \
   ++agent.config.scorer_ckpt="'${scorer_ckpt}'" \
   ++agent.config.scorer_vocab_path="'${scorer_vocab_path}'" \

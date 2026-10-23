@@ -103,10 +103,12 @@ CKPT=$NAVSIM_EXP_ROOT/train_dp_official_fm_joint/epoch=18-step=81776.ckpt \
 
 | ID | 配置 | 预算 |
 |---|---|---|
-| `P1_center` | 在 FM 主损失之外，对**零噪声路径的还原轨迹**加辅助监督（与轨迹辅助同口径） | 18 epoch |
-| `P1_base` | 同一配方但不加中心约束 | 18 epoch |
+| `P1_center` | `fm_center_weight=0.5`，零噪声 Euler（默认 4 步）还原轨迹 + drift/heading | 18 epoch |
+| `P1_base` | 同一配方，`fm_center_weight=0` | 18 epoch |
 
-两臂都从官方 ckpt + 重初始化轨迹头起，同预算。
+两臂都从官方 ckpt + 重初始化轨迹头起，同预算。评测统一 `DP_EVAL_ZERO_NOISE=true`。
+
+**一键**：`bash scripts/dp/runs/ch3_df_model/run_phase1.sh`（`EPOCHS=5` 可先看趋势）。
 
 **判据**：`P1_center − P1_base > +0.005`。
 
