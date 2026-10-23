@@ -103,12 +103,13 @@ CKPT=$NAVSIM_EXP_ROOT/train_dp_official_fm_joint/epoch=18-step=81776.ckpt \
 
 | ID | 配置 | 预算 |
 |---|---|---|
-| `P1_center` | `fm_center_weight=0.5`，零噪声 Euler（默认 4 步）还原轨迹 + drift/heading | 18 epoch |
-| `P1_base` | 同一配方，`fm_center_weight=0` | 18 epoch |
+| `P1_center` | `fm_center_weight=0.5`，零噪声 Euler（默认 4 步）还原轨迹 + drift/heading | **默认 5** epoch（可 `EPOCHS=18`） |
+| `P1_base` | 同一配方，`fm_center_weight=0` | **默认 5** epoch |
 
-两臂都从官方 ckpt + 重初始化轨迹头起，同预算。评测统一 `DP_EVAL_ZERO_NOISE=true`。
+两臂**同一基准**：官方 ckpt + 重初始化轨迹头，其余开关一致，只差 `fm_center_weight`。  
+评测统一 `DP_EVAL_ZERO_NOISE=true`。先 5 epoch 看 `center−base`，过线再拉满。
 
-**一键**：`bash scripts/dp/runs/ch3_df_model/run_phase1.sh`（`EPOCHS=5` 可先看趋势）。
+**一键**：`bash scripts/dp/runs/ch3_df_model/run_phase1.sh`
 
 **实现补充（2026-10-23）**：
 - 权重线性 warmup：`fm_center_warmup_steps`（默认 2000，按 `_sc_calls`）。
