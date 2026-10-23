@@ -1,0 +1,7 @@
+tag,score,mode,csv
+p0_first_1,0.7412264016990743,one_stage_fallback,exp/ch3_df/p0_first_1/2026.10.22.17.25.39/2026.10.22.21.11.06.csv
+p0_first_2,0.7424202575493422,one_stage_fallback,exp/ch3_df/p0_first_2/2026.10.22.21.11.34/2026.10.23.00.48.18.csv
+p0_first_3,0.7417472585952828,one_stage_fallback,exp/ch3_df/p0_first_3/2026.10.23.00.48.45/2026.10.23.04.25.15.csv
+p0_medoid,0.758241313902779,one_stage_fallback,exp/ch3_df/p0_medoid/2026.10.23.04.25.41/2026.10.23.09.04.49.csv
+p0_official_first,0.7316625161226344,one_stage_fallback,exp/ch3_df/p0_official_first/2026.10.23.12.43.20/2026.10.23.18.05.08.csv
+p0_zero,0.7657216827809973,one_stage_fallback,exp/ch3_df/p0_zero/2026.10.23.09.05.14/2026.10.23.12.42.53.csv

@@ -67,6 +67,14 @@ FORCE_RERUN=1 DP_EVAL_ZERO_NOISE=true EXP_NAME=ch3_df/p0_zero CKPT=$CKPT \
 - 若 `medoid` 或 `zero` 比 `first` 高 > 0.01 → 推断退化是本 chapter 的核心问题，进入 Phase 1。
 - 若三者接近 → 生成式模型的单样本已经足够好，转 Phase 3（换骨干）。
 
+**结果（2026-10-23，详见 `RESULTS_PHASE0.md`）**：
+
+| | official | FM first±std | medoid | zero |
+|---|---:|---:|---:|---:|
+| score | 0.7317 | **0.7418±0.0006** | **0.7582（+0.016）** | **0.7657（+0.024）** |
+
+→ 判据通过，**进入 Phase 1**。主推 zero；medoid 作对照。
+
 **成本**：3–5 次评测，每次约数小时（纯推理），**不需要训练**。
 
 **一键执行**：
