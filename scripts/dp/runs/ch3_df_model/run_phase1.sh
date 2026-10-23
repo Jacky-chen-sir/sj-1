@@ -28,15 +28,18 @@ GPU="${GPU:-0,1,2}"
 FM_STEPS="${FM_STEPS:-20}"
 FM_CENTER_WEIGHT="${FM_CENTER_WEIGHT:-0.5}"
 FM_CENTER_STEPS="${FM_CENTER_STEPS:-4}"
-# 与 Phase0 / 新训配方一致：自条件开（从零重 init 头时可开）
-FM_SELF_CONDITIONING="${FM_SELF_CONDITIONING:-true}"
+FM_CENTER_WARMUP_STEPS="${FM_CENTER_WARMUP_STEPS:-2000}"
+# 与 ep18 / Phase 0 对齐：自条件关闭。两臂必须一致；想同时试自条件就都设 true。
+FM_SELF_CONDITIONING="${FM_SELF_CONDITIONING:-false}"
 DRY_RUN="${DRY_RUN:-0}"
 SKIP_TRAIN="${SKIP_TRAIN:-0}"
 SKIP_EVAL="${SKIP_EVAL:-0}"
 
-mkdir -p "$NAVSIM_EXP_ROOT/$REL" "$NAVSIM_EXP_ROOT/logs"
 SUMMARY="$NAVSIM_EXP_ROOT/$REL/summary_phase1.csv"
-[ -f "$SUMMARY" ] || echo "arm,epochs,score,ckpt,eval_mode" > "$SUMMARY"
+if [ "$DRY_RUN" != "1" ]; then
+  mkdir -p "$NAVSIM_EXP_ROOT/$REL" "$NAVSIM_EXP_ROOT/logs"
+  [ -f "$SUMMARY" ] || echo "arm,epochs,score,ckpt,eval_mode" > "$SUMMARY"
+fi
 
 say() { echo; echo "=============================================================="; echo "$*"; echo "=============================================================="; }
 
@@ -47,6 +50,7 @@ train_arm() {
   if [ "$DRY_RUN" = "1" ]; then
     echo "DRY_RUN: MAX_EPOCHS=$EPOCHS EXP_NAME=$exp GPU=$GPU BS=$BS NUM_WORKERS=$WORKERS \\"
     echo "         REINIT_TRAJ_HEAD=true FM_CENTER_WEIGHT=$center_w FM_CENTER_STEPS=$FM_CENTER_STEPS \\"
+    echo "         FM_CENTER_WARMUP_STEPS=$FM_CENTER_WARMUP_STEPS \\"
     echo "         FM_SELF_CONDITIONING=$FM_SELF_CONDITIONING SCORER_GUIDANCE=false bash $TRAIN"
     return 0
   fi
@@ -57,6 +61,7 @@ train_arm() {
   MAX_EPOCHS="$EPOCHS" EXP_NAME="$exp" GPU="$GPU" BS="$BS" NUM_WORKERS="$WORKERS" \
   REINIT_TRAJ_HEAD=true \
   FM_CENTER_WEIGHT="$center_w" FM_CENTER_STEPS="$FM_CENTER_STEPS" FM_CENTER_P=1.0 \
+  FM_CENTER_WARMUP_STEPS="$FM_CENTER_WARMUP_STEPS" \
   FM_SELF_CONDITIONING="$FM_SELF_CONDITIONING" \
   SCORER_GUIDANCE=false LAMBDA_SCORE=0 LAMBDA_SAFE_FEAS=0 LAMBDA_COMFORT_DIV=0 \
     bash "$TRAIN"
@@ -66,8 +71,12 @@ eval_arm() {
   local arm="$1"
   local exp_dir="$NAVSIM_EXP_ROOT/$REL/p1_$arm"
   local ckpt
-  ckpt="$(ls -1t "$exp_dir"/epoch=*.ckpt 2>/dev/null | head -n 1 || true)"
-  [ -n "$ckpt" ] || { echo "[WARN] p1_$arm: 无 epoch ckpt"; return 0; }
+  if [ "$DRY_RUN" = "1" ]; then
+    ckpt="<${exp_dir}/epoch=XX.ckpt>"
+  else
+    ckpt="$(ls -1t "$exp_dir"/epoch=*.ckpt 2>/dev/null | head -n 1 || true)"
+    [ -n "$ckpt" ] || { echo "[WARN] p1_$arm: 无 epoch ckpt"; return 0; }
+  fi
   local tag="navtest-p1_${arm}-zero"
   say "[EVAL] p1_$arm  zero-noise  ($ckpt)"
   if [ "$DRY_RUN" = "1" ]; then

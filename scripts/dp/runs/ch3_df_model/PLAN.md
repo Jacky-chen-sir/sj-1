@@ -110,6 +110,14 @@ CKPT=$NAVSIM_EXP_ROOT/train_dp_official_fm_joint/epoch=18-step=81776.ckpt \
 
 **一键**：`bash scripts/dp/runs/ch3_df_model/run_phase1.sh`（`EPOCHS=5` 可先看趋势）。
 
+**实现补充（2026-10-23）**：
+- 权重线性 warmup：`fm_center_warmup_steps`（默认 2000，按 `_sc_calls`）。
+  从官方初始化重训时，早期的中心落点没有意义，直接施加会把噪声当目标。
+- 中心损失含漂移 + 航向 + 运动学（与轨迹辅助同口径，不做 1/t_eff 归一）。
+- 单测：`navsim/agents/dp/tests/test_center_consistency.py`。
+- `FM_SELF_CONDITIONING` 默认 **false**，与 ep18 / Phase 0（76.57）对齐；
+  两臂必须一致，想同时试自条件就都设 true。
+
 **判据**：`P1_center − P1_base > +0.005`。
 
 ### Phase 2 — 长预算复现（按需）

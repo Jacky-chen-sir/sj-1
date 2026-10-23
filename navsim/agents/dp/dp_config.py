@@ -102,6 +102,8 @@ class DPConfig(TransfuserConfig):
     fm_center_weight: float = 0.0
     fm_center_steps: int = 4
     fm_center_p: float = 1.0
+    # 权重线性 warmup（按训练步）。从官方初始化重训时，早期的中心落点没有意义。
+    fm_center_warmup_steps: int = 2000
 
     seq_len: int = 2
     trajectory_imi_weight: float = 1.0

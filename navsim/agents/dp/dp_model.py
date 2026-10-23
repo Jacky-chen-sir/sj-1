@@ -14,7 +14,7 @@
 # limitations under the License.
 
 import math
-from typing import Dict
+from typing import Dict, Tuple
 
 import torch
 import torch.nn as nn
@@ -297,6 +297,7 @@ class DPHead(nn.Module):
         self.fm_center_weight = float(getattr(config, 'fm_center_weight', 0.0))
         self.fm_center_steps = int(getattr(config, 'fm_center_steps', 4))
         self.fm_center_p = float(getattr(config, 'fm_center_p', 1.0))
+        self.fm_center_warmup_steps = int(getattr(config, 'fm_center_warmup_steps', 2000))
         # 纯 Python 计数器（不是 buffer，不进 state_dict，resume 后重新 warmup）
         self._sc_calls = 0
 
@@ -390,6 +391,69 @@ class DPHead(nn.Module):
             return self.fm_self_consistency_p
         ratio = min(1.0, self._sc_calls / float(self.fm_sc_warmup_steps))
         return self.fm_self_consistency_p * ratio
+
+    def _center_alpha(self) -> float:
+        """中心一致性损失的当前权重（线性 warmup）。
+
+        从官方初始化重训时，早期的零噪声落点没有意义，过早施加会把噪声当目标。
+        计数器复用 `_sc_calls`（每个 FM batch +1）；权重为 0 时返回 0，整块跳过。
+        """
+        if self.fm_center_weight <= 0.0:
+            return 0.0
+        if self.fm_center_warmup_steps <= 0:
+            return self.fm_center_weight
+        return self.fm_center_weight * min(
+            1.0, self._sc_calls / float(self.fm_center_warmup_steps))
+
+    def _fm_zero_noise_path(self, kv: torch.Tensor) -> torch.Tensor:
+        """从 x(0)=0 做短 Euler，返回中心轨迹的归一化增量。
+
+        与推理 `dp_eval_zero_noise=True` 同一套起点与积分方向；训练用
+        `fm_center_steps`（默认 4）控制算力。积分图参与反传，目的是让这条
+        路径本身变好，不能 detach。
+        """
+        B = kv.shape[0]
+        steps = max(1, int(self.fm_center_steps))
+        dt = 1.0 / float(steps)
+        x = torch.zeros((B, HORIZON, ACTION_DIM), device=kv.device, dtype=torch.float)
+        self_cond = None
+        for i in range(steps):
+            t01 = torch.full((B,), 1.0 - i * dt, dtype=x.dtype, device=x.device)
+            v = self.transformer_dp(x, self._fm_time_for_transformer(t01), kv,
+                                    self_cond=self_cond)
+            v = self._fm_clip_velocity(x, t01, v)
+            if self.fm_self_conditioning:
+                self_cond = self._fm_x1_pred(x, t01, v).view(B, -1)
+            x = x + v * dt
+        return x
+
+    def _center_consistency_loss(self, x1_center: torch.Tensor,
+                                 x1: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """中心轨迹与真值的辅助损失（漂移 + 航向 + 运动学）。
+
+        `x1_center` 是 t=0 的最终落点，不是某个 t 上的一步估计，故不做 1/t_eff
+        归一；三路的组成与轨迹辅助损失一致，相对权重沿用同一组配置。
+        """
+        resid = x1_center[..., :2] - x1[..., :2]
+        drift = resid.cumsum(dim=1)
+        pos_loss = F.smooth_l1_loss(drift, torch.zeros_like(drift))
+
+        n_pred = x1_center[..., 2:4]
+        n_pred = n_pred / n_pred.norm(dim=-1, keepdim=True).clamp_min(1e-4)
+        head_loss = (1.0 - (n_pred * x1[..., 2:4]).sum(-1)).mean()
+
+        loss = (self.fm_traj_aux_pos_weight * pos_loss
+                + self.fm_traj_aux_head_weight * head_loss)
+        extras = {'fm_center_pos_loss': pos_loss.detach(),
+                  'fm_center_head_loss': head_loss.detach()}
+        if self.fm_kin_weight > 0.0 and resid.shape[1] >= 3:
+            d1 = resid.diff(dim=1)
+            d2 = d1.diff(dim=1)
+            kin_loss = (F.smooth_l1_loss(d1, torch.zeros_like(d1))
+                        + F.smooth_l1_loss(d2, torch.zeros_like(d2)))
+            loss = loss + self.fm_kin_weight * kin_loss
+            extras['fm_center_kin_loss'] = kin_loss.detach()
+        return loss, extras
 
     def _fm_rollout_to_t(self, noise: torch.Tensor, t01: torch.Tensor, cond: torch.Tensor,
                          n_roll: int) -> torch.Tensor:
@@ -570,31 +634,21 @@ class DPHead(nn.Module):
 
             # 中心一致性（Phase 1）：从 x_T=0 做短 Euler，对还原增量施 drift+heading。
             # 与推理 dp_eval_zero_noise 同起点；步数用 fm_center_steps（默认 4）控算力。
-            if (self.fm_center_weight > 0.0
+            center_w = self._center_alpha()
+            if (center_w > 0.0
                     and bool(torch.rand((), device=device) < self.fm_center_p)):
-                n_c = max(1, int(self.fm_center_steps))
-                dt_c = 1.0 / float(n_c)
-                x_c = torch.zeros_like(x1)
-                self_cond_c = None
-                for i_c in range(n_c):
-                    t_val_c = 1.0 - i_c * dt_c
-                    t01_c = torch.full((B,), t_val_c, dtype=x1.dtype, device=device)
-                    v_c = self.transformer_dp(
-                        x_c, self._fm_time_for_transformer(t01_c), kv, self_cond=self_cond_c)
-                    v_c = self._fm_clip_velocity(x_c, t01_c, v_c)
-                    if self.fm_self_conditioning:
-                        self_cond_c = self._fm_x1_pred(x_c, t01_c, v_c).view(B, -1)
-                    x_c = x_c + v_c * dt_c
-                resid_c = x_c[..., :2] - x1[..., :2]
-                drift_c = resid_c.cumsum(dim=1)
-                pos_c = F.smooth_l1_loss(drift_c, torch.zeros_like(drift_c))
-                n_c_pred = x_c[..., 2:4]
-                n_c_pred = n_c_pred / n_c_pred.norm(dim=-1, keepdim=True).clamp_min(1e-4)
-                head_c = (1.0 - (n_c_pred * x1[..., 2:4]).sum(-1)).mean()
-                center_loss = (self.fm_traj_aux_pos_weight * pos_c
-                               + self.fm_traj_aux_head_weight * head_c)
-                fm_loss = fm_loss + self.fm_center_weight * center_loss
+                x_c = self._fm_zero_noise_path(kv)
+                center_loss, c_extras = self._center_consistency_loss(x_c, x1)
+                fm_loss = fm_loss + center_w * center_loss
+                extras.update(c_extras)
                 extras['fm_center_loss'] = center_loss.detach()
+                extras['fm_center_warm'] = torch.tensor(center_w, device=device)
+                with torch.no_grad():
+                    traj_c = cumsum_traj(x_c.detach())
+                    traj_gt = cumsum_traj(x1)
+                    err = (traj_c[..., :2] - traj_gt[..., :2]).norm(dim=-1)
+                    extras['fm_center_ade'] = err.mean()
+                    extras['fm_center_fde'] = err[:, -1].mean()
 
             # ==============================================================
             # 创新点 A/B：评价器引导的生成（论文 3.4.7 / 3.5.5 节）
