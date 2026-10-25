@@ -634,7 +634,8 @@ class DPHead(nn.Module):
 
             # 中心一致性（Phase 1）：从 x_T=0 做短 Euler，对还原增量施 drift+heading。
             # 与推理 dp_eval_zero_noise 同起点；步数用 fm_center_steps（默认 4）控算力。
-            center_w = self._center_alpha()
+            # 只在训练时施加：验证时加上会让两臂的 val/loss 不可比（center 臂多一项）
+            center_w = self._center_alpha() if self.training else 0.0
             if (center_w > 0.0
                     and bool(torch.rand((), device=device) < self.fm_center_p)):
                 x_c = self._fm_zero_noise_path(kv)
