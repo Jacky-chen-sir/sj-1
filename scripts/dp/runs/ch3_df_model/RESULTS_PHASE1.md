@@ -75,3 +75,41 @@ exp/logs/ch3_df_phase1_e5_20261023_195410.log
 ```
 
 训练时段：base ≈ 2026-10-23 → 10-26；center ≈ 10-26 → 10-28；评测 10-28 当天完成。
+
+## 6. 复核意见（2026-10-29）
+
+结论成立（+0.073 远大于判据），Phase 2 照常跑。以下三点写论文前要补或要注意：
+
+**① 只评了一个 ckpt、只评了 zero。**
+`summary_phase1.csv` 是旧版 `run_phase1.sh` 的输出（表头 `arm,epochs,score,...`），每臂只评了
+`epoch=04` 的 zero。同一训程相邻 ckpt 波动可达 0.01–0.03（历史 ep11–19 在 0.705–0.738），
++0.073 远大于这个量级，结论不会翻；但论文表格需要“最后 3 个 epoch 的均值±标准差”。
+另外中心损失**直接优化的就是 zero 路径**，只报 zero 容易被问“是不是只是对齐了评测规则”。
+补一组 `first`（单样本）：若 center 在 first 上也涨，说明整个分布变好了，论证更硬。
+
+```bash
+# 两臂最后 3 个 epoch × {zero, first}，空闲卡上跑，不影响 Phase 2
+ARMS="p1_base p1_center" GPU=<空闲卡> bash scripts/dp/runs/ch3_df_model/eval_ckpts.sh
+```
+
+**② base 臂 5ep 的绝对分偏低，增益幅度会随训练变长收窄。**
+p1_base 0.640 明显低于 P0 first（0.742）；差距主要在 two_frame_comfort（0.62 vs 0.86）。
+说明短训时零噪声路径本身还很抖，中心损失恰好在修这一点。长训后 base 自己也会变好，
+所以 +0.073 是“5ep 同预算”的结论，论文里要注明预算；长预算增益以 Phase 2 为准。
+
+**③ Phase 2 目前缺同配方的 base 臂。**
+`p2_center18` 的对照是 FM-only ep18（0.7657），但两者配方不同（ep18 无 aux/kin/自洽，
+self_cond=false；P2 全配方 + self_cond=true），差值不能归因于中心损失。
+- 若 Phase 2 > 0.7657：可直接写“完整方法超过 FM 基线”，不需要归因到单项。
+- 若要归因中心损失的长预算增益：需要 `p2_base18`（center_w=0，其余同 P2），再占 8–9 天。
+  建议先等 P2 结果，再决定是否补。
+
+**Phase 2 选点。** 训练中可用空闲卡评已落盘的中间 epoch，不必等到最后：
+
+```bash
+ARMS="p2_center18" EPOCHS_LIST="8 12 15 17" INFER="zero" GPU=<空闲卡> \
+  bash scripts/dp/runs/ch3_df_model/eval_ckpts.sh
+```
+
+注意：`run_phase2.sh` 只评“最新”一个 ckpt，且用 `find|head` 取 csv（重跑时可能取到旧的）。
+它正在跑，没有改；评测改用上面的 `eval_ckpts.sh`。
