@@ -70,5 +70,6 @@ Phase1 后续增强（远程 `c28c7cb`）：可评最后 N 个 epoch、K∈{20, 
 |---|---|
 | `STATUS.md` | 总进度与结论 |
 | `RESULTS_PHASE0.md` / `RESULTS_PHASE1.md` / `RESULTS_PHASE2.md` | 分阶段分数 |
+| `TENSORBOARD.md` / `tb_export/` | P1/P2 曲线导出与解读 |
 | `PLAN.md` | 原实验计划（含 Phase3 ViT-L） |
 | `summary_phase{0,1,2}.csv` | 机器可读汇总 |

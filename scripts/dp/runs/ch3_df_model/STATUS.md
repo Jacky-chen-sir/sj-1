@@ -12,7 +12,7 @@
 | **Phase 2** | center × 18ep | **完成，未达预期** | **0.6621**（comfort 崩） |
 | Phase 3 | ViT-L 换骨干 | 未开始 | 需工程接入后再训 |
 
-详细：`RESULTS_PHASE0/1/2.md`；代码：`TRAINING_CODE.md`。
+详细：`RESULTS_PHASE0/1/2.md`；代码：`TRAINING_CODE.md`；曲线：`TENSORBOARD.md` + `tb_export/`。
 
 ## 分数一览（zero-noise，除非另注）
 
@@ -38,7 +38,8 @@
 
 同配方拉满 18ep → **0.6621**，低于 P1 与 P0。  
 根因：轨迹加速度/jerk 升高，**two_frame comfort 0.88→0.16**（非评测 bug）。  
-见 `RESULTS_PHASE2.md`。正在补评 `epoch=04` 验证 early-stop。
+**TB**：val loss / ADE 持续下降到 ep17，**看不出**掉分；仅 BEV semantic 略升。见 `TENSORBOARD.md`。  
+正在补评 `epoch=04` 验证 early-stop。
 
 ## Phase 3（未开始）
 
