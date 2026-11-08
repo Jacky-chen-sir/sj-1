@@ -1,6 +1,6 @@
 # 第三章（sj-df_model）进度总表
 
-> 更新：2026-11-08  
+> 更新：2026-11-09  
 > 分支：`sj-df_model`　目标：单独生成模型 navtest > 0.73（不接词表/评价器）
 
 ## 总览
@@ -9,7 +9,8 @@
 |---|---|---|---|
 | **Phase 0** | 推断方式对照（零训练） | **完成** | zero **0.7657**（本章最高） |
 | **Phase 1** | 中心一致性 5ep 两臂 | **完成** | center−base **+0.073** |
-| **Phase 2** | center × 18ep | **完成，未达预期** | **0.6621**（comfort 崩） |
+| **Phase 2** | center × 18ep | **完成，未达预期** | ep17 **0.6621**；ep04 **0.6958**（early-stop 成立） |
+| **Phase1-v2** | 修复后代码重跑 | **进行中** | `ch3_df_v2` |
 | Phase 3 | ViT-L 换骨干 | 未开始 | 需工程接入后再训 |
 
 详细：`RESULTS_PHASE0/1/2.md`；代码：`TRAINING_CODE.md`；曲线：`TENSORBOARD.md` + `tb_export/`。
@@ -24,7 +25,8 @@
 | **FM zero（P0，主推）** | **0.7657** |
 | p1_base 5ep | 0.6399 |
 | p1_center 5ep | 0.7125 |
-| **p2_center18** | **0.6621** |
+| P2 ep04（同 run 早停） | **0.6958** |
+| **P2 ep17** | **0.6621** |
 
 ## Phase 0（完成）
 
@@ -34,16 +36,19 @@
 
 同基准短训：center 损失有效（+0.073）。实际 `self_cond=true`。见 `RESULTS_PHASE1.md`。
 
-## Phase 2（完成，失败）
+## Phase 2（完成，失败；early-stop 已验证）
 
-同配方拉满 18ep → **0.6621**，低于 P1 与 P0。  
-根因：轨迹加速度/jerk 升高，**two_frame comfort 0.88→0.16**（非评测 bug）。  
-**TB**：val loss / ADE 持续下降到 ep17，**看不出**掉分；仅 BEV semantic 略升。见 `TENSORBOARD.md`。  
-正在补评 `epoch=04` 验证 early-stop。
+同配方拉满 18ep → **0.6621**（comfort **0.16**）。  
+同 run 的 **ep04 = 0.6958**（comfort **0.89**）≈ P1 center 0.7125 → **长训变差，不是起点就坏**。  
+见 `RESULTS_PHASE2.md` §ep04。
+
+## Phase1-v2（进行中）
+
+修复后代码重跑：`ch3_df_v2/p1_{base,center}`，5ep，`fm_center_k_set=[4,8,20]`，`val/fm_zero_ade` 选 ckpt。
 
 ## Phase 3（未开始）
 
-换 Depth Anything ViT-L + FM，约 18ep。见 `PLAN.md`。**当前无排队训练。**
+换 Depth Anything ViT-L + FM，约 18ep。见 `PLAN.md`。
 
 ## 论文口径（截至 P2）
 

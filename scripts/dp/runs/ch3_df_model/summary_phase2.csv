@@ -1,2 +1,3 @@
 arm,epochs,score,ckpt,eval_mode
 center18,18,0.6621310077516795,/home/ws/navsim_workspace/exp/ch3_df/p2_center18/epoch=17-step=77472.ckpt,zero_noise
+center18_ep04,5,0.6957773676799851,/home/ws/navsim_workspace/exp/ch3_df/p2_center18/epoch=04-step=21520.ckpt,zero_noise
