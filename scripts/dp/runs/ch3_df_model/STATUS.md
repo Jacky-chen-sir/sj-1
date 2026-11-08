@@ -1,68 +1,59 @@
 # 第三章（sj-df_model）进度总表
 
-> 更新：2026-10-29  
-> 分支：`sj-df_model`　目标：单独生成模型 navtest > 0.73，越高越好（不接词表/评价器）
+> 更新：2026-11-08  
+> 分支：`sj-df_model`　目标：单独生成模型 navtest > 0.73（不接词表/评价器）
 
 ## 总览
 
 | 阶段 | 内容 | 状态 | 关键数字 |
 |---|---|---|---|
-| **Phase 0** | 推断方式对照（零训练） | **完成** | zero **0.7657**（+0.024 vs first） |
-| **Phase 1** | 中心一致性 5ep 两臂 | **完成** | center−base **+0.073**（过线） |
-| **Phase 2** | center 拉满 18ep | **进行中** | `p2_center18` 已启动 |
-| Phase 3 | ViT-L 换骨干 | 未开始 | — |
+| **Phase 0** | 推断方式对照（零训练） | **完成** | zero **0.7657**（本章最高） |
+| **Phase 1** | 中心一致性 5ep 两臂 | **完成** | center−base **+0.073** |
+| **Phase 2** | center × 18ep | **完成，未达预期** | **0.6621**（comfort 崩） |
+| Phase 3 | ViT-L 换骨干 | 未开始 | 需工程接入后再训 |
 
-详细分数见 `RESULTS_PHASE0.md` / `RESULTS_PHASE1.md`。
+详细：`RESULTS_PHASE0/1/2.md`；代码：`TRAINING_CODE.md`。
 
-## Phase 0（已完成，2026-10-22 → 10-23）
+## 分数一览（zero-noise，除非另注）
 
-- **问题**：历史 0.738 取 `proposals[0]`，不是确定性上限。
-- **结论**：medoid +0.016 / zero **+0.024** vs FM first（0.7418±0.0006）；主推 **零噪声路径**。
-- **脚本**：`run_phase0.sh`　**结果文**：`RESULTS_PHASE0.md`
-
-| | official DDPM | FM first | medoid | zero |
-|---|---:|---:|---:|---:|
-| score | 0.7317 | 0.7418±0.0006 | 0.7582 | **0.7657** |
-
-## Phase 1（已完成，训 10-23→10-28，评 10-28）
-
-- **问题**：仅推理换中心不够，训练里是否也应监督零噪声路径？
-- **设置**：官方 ckpt + reinit 头；base `center_w=0` vs center `0.5`；各 5ep；评测 zero。
-- **结论**：**符合预期且远超门槛**（+0.073 ≫ +0.005）。涨分来自 DAC / comfort / NC / TTC。绝对分低于 P0 zero 属短预算，不否定方法。
-- **脚本**：`run_phase1.sh`　**结果文**：`RESULTS_PHASE1.md`
-
-| arm | score (zero) |
+| 标签 | score |
 |---|---:|
-| p1_base | 0.6399 |
-| p1_center | **0.7125**（Δ **+0.0726**） |
+| official DDPM first | 0.7317 |
+| FM first（×3 mean） | 0.7418 |
+| FM medoid | 0.7582 |
+| **FM zero（P0，主推）** | **0.7657** |
+| p1_base 5ep | 0.6399 |
+| p1_center 5ep | 0.7125 |
+| **p2_center18** | **0.6621** |
 
-口径备注：两臂实际 `fm_self_conditioning=true`（与 P0 的 false 不同）；臂间公平，跨阶段比绝对分时注意。
+## Phase 0（完成）
 
-## Phase 2（进行中，2026-10-29 启动）
+推断退化可免费抬分；主推零噪声。见 `RESULTS_PHASE0.md`。
 
-- **作业**：`p2_center18` = Phase1 有效配方 × **18** epoch → 自动 zero 评测。
-- **对照**：已有 FM-only ep18（`train_dp_official_fm_joint/epoch=18-step=81776.ckpt`，P0 zero **0.7657**）；脚本支持 `ARM=fm18|both` 补评。
-- **脚本**：`run_phase2.sh`
-- **日志**：`exp/logs/ch3_df_phase2_center18_20261029_135213.log`
-- **ETA**：按 P1 节奏约 **8–9 天**训 + ~2h 评。
+## Phase 1（完成）
 
-```bash
-# 已用（与 P1 同口径）
-FM_SELF_CONDITIONING=true ARM=center EPOCHS=18 \
-  bash scripts/dp/runs/ch3_df_model/run_phase2.sh
+同基准短训：center 损失有效（+0.073）。实际 `self_cond=true`。见 `RESULTS_PHASE1.md`。
+
+## Phase 2（完成，失败）
+
+同配方拉满 18ep → **0.6621**，低于 P1 与 P0。  
+根因：轨迹加速度/jerk 升高，**two_frame comfort 0.88→0.16**（非评测 bug）。  
+见 `RESULTS_PHASE2.md`。正在补评 `epoch=04` 验证 early-stop。
+
+## Phase 3（未开始）
+
+换 Depth Anything ViT-L + FM，约 18ep。见 `PLAN.md`。**当前无排队训练。**
+
+## 论文口径（截至 P2）
+
+1. 单样本随机取提案相对确定性中心约 **−2.4** 分（P0）。
+2. 中心一致性短训相对同预算基线 **+7.3** 分（P1）；长训会过拟合抖动（P2 负面结果）。
+3. 绝对分主结果仍用 **P0 zero 0.7657**；冲更高优先 Phase3，而非再盲训 center×18。
+
+## 产物
+
 ```
-
-## 产物根目录
-
+exp/ch3_df/summary_phase{0,1,2}.csv
+exp/ch3_df/p0_* / p1_{base,center} / p2_center18 /
+exp/ch3_df/navtest-p1_*-zero / navtest-p2_center18-zero /
 ```
-exp/ch3_df/
-  summary_phase0.csv  summary_phase1.csv  (summary_phase2.csv 待写)
-  p0_* / p1_base / p1_center / p2_center18 /
-  navtest-p1_{base,center}-zero /
-```
-
-## 论文侧已可写的结论（截至 Phase1）
-
-1. 单样本随机取提案相对确定性中心有 **~2.4** 分退化（表：推断对照）。
-2. 把零噪声路径写进训练目标（中心一致性），同预算下相对无该损失的基线 **+7.3** 分（5ep 趋势；长训待 Phase2）。
-3. 机制上主要抬 **可行驶区 / 舒适 / 碰撞相关**，略换 progress——与「更稳中心」叙事一致。

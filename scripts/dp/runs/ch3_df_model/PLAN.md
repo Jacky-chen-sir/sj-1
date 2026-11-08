@@ -130,14 +130,15 @@ CKPT=$NAVSIM_EXP_ROOT/train_dp_official_fm_joint/epoch=18-step=81776.ckpt \
 → 判据通过（约 14× 门槛）。绝对分仍低于 P0 zero（0.7657）属短预算；**进入 Phase 2**。  
 口径：实际两臂 `fm_self_conditioning=true`（与 PLAN 默认 false / P0 不同，臂间一致）。总进度见 `STATUS.md`。
 
-### Phase 2 — 长预算复现（按需；**进行中**）
+### Phase 2 — 长预算复现（按需；**已完成，未达预期**）
 
 | ID | 配置 |
 |---|---|
 | `P2_fm18` | FM-only 18 epoch（= ep18，已有；P0 zero **0.7657**） |
-| `P2_center18` | Phase 1 的有效配置跑满 18 epoch（**2026-10-29 已启动**） |
+| `P2_center18` | Phase 1 配方 × 18 epoch → zero **0.6621**（comfort 崩） |
 
-一键：`FM_SELF_CONDITIONING=true bash scripts/dp/runs/ch3_df_model/run_phase2.sh`
+详见 `RESULTS_PHASE2.md`。一键：`FM_SELF_CONDITIONING=true bash scripts/dp/runs/ch3_df_model/run_phase2.sh`  
+**不要**再盲开 center×18；中间 epoch / 降权 / Phase3 另议。
 
 ### Phase 3 — 换基座（底线保障）
 
@@ -161,8 +162,8 @@ CKPT=$NAVSIM_EXP_ROOT/train_dp_official_fm_joint/epoch=18-step=81776.ckpt \
    ├─ medoid 或 zero 明显更好 → Phase 1
    └─ 三者接近 → 直接 Phase 3
 ③ Phase 1（5 epoch × 2 臂趋势；已完成，+0.073）
-④ Phase 2（center × 18 epoch；进行中）→ 过线再考虑 Phase 3
-⑤ Phase 3（换 ViT-L，工程 + 18 epoch）
+④ Phase 2（center × 18 epoch；完成但掉分 → 保留负面结果）
+⑤ Phase 3（换 ViT-L，工程 + 18 epoch；可选，冲绝对分）
 ```
 
 ## 4. 成本
@@ -171,7 +172,7 @@ CKPT=$NAVSIM_EXP_ROOT/train_dp_official_fm_joint/epoch=18-step=81776.ckpt \
 |---|---|---|---|---|
 | Phase 0 | 0 | 4–5 次 | 1 天 | 完成 |
 | Phase 1 | 2 × 5 epoch | 2 次 | ~5 天 | 完成 |
-| Phase 2 | 1 × 18 epoch | 1–2 次 | ~8–9 天 | 进行中 |
+| Phase 2 | 1 × 18 epoch | 1 次 | ~9 天 | 完成（失败） |
 | Phase 3 | 1 × 18 epoch | 1 次 | 5 天 + 工程 | 未开始 |
 
 ## 5. 论文怎么写
