@@ -72,5 +72,6 @@
 ```
 exp/ch3_df/summary_phase{0,1,2}.csv
 exp/ch3_df/p0_* / p1_{base,center} / p2_center18 /
-exp/ch3_df/navtest-p1_*-zero / navtest-p2_center18-zero /
+exp/ch3_df/navtest-p1_*-zero / navtest-p2_center18-zero / navtest-p2_ep04-zero /
+exp/ch3_df_v2/   # Phase1-v2 进行中
 ```
