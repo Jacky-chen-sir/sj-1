@@ -102,8 +102,20 @@ class DPConfig(TransfuserConfig):
     fm_center_weight: float = 0.0
     fm_center_steps: int = 4
     fm_center_p: float = 1.0
+    # 中心路径的步数集合。空 = 固定 fm_center_steps。
+    # 非空时每批抽一个 K：只在 K=4 上训、却在 K=20 上评，模型会学到补偿粗积分误差的
+    # 速度场，细步长下反而偏。集合里应包含评测要扫的每个 K。
+    fm_center_k_set: Tuple[int, ...] = ()
     # 权重线性 warmup（按训练步）。从官方初始化重训时，早期的中心落点没有意义。
     fm_center_warmup_steps: int = 2000
+    # 校验期额外算一组确定性监控量（零噪声路径的 ADE/FDE/加速度/jerk）。
+    # 不参与反传，也不进 val/loss；ModelCheckpoint 用它挑 ckpt 比 val/loss 稳。
+    fm_val_probe: bool = True
+    fm_val_probe_steps: int = 20
+    # 每个校验轮只在前 N 个 batch 上跑探针。20 步 Euler 的单批成本约等于 20 次前向，
+    # 对全部校验批都跑会让每轮多出近一个训练 epoch 的算力。val_dataloader 是
+    # shuffle=False，所以这 N 个 batch 在轮与轮之间完全相同，指标仍然可比。
+    fm_val_probe_batches: int = 8
 
     seq_len: int = 2
     trajectory_imi_weight: float = 1.0

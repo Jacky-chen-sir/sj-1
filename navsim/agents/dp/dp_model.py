@@ -298,7 +298,19 @@ class DPHead(nn.Module):
         self.fm_center_steps = int(getattr(config, 'fm_center_steps', 4))
         self.fm_center_p = float(getattr(config, 'fm_center_p', 1.0))
         self.fm_center_warmup_steps = int(getattr(config, 'fm_center_warmup_steps', 2000))
-        # 纯 Python 计数器（不是 buffer，不进 state_dict，resume 后重新 warmup）
+        # 中心路径的 Euler 步数集合。为空 = 固定用 fm_center_steps。
+        # 非空时每步从集合里抽一个 K，让中心路径在多个步数下都是好解：只用 K=4 训、
+        # 用 K=20 评，模型会学到"补偿 K=4 的积分误差"，那套速度场在细步长下是错的。
+        self.fm_center_k_set = tuple(int(k) for k in (getattr(
+            config, 'fm_center_k_set', ()) or ()) if int(k) > 0)
+        # 校验期确定性监控（零噪声路径）。步数单独取，便于和评测口径对齐。
+        self.fm_val_probe = bool(getattr(config, 'fm_val_probe', True))
+        self.fm_val_probe_steps = int(getattr(config, 'fm_val_probe_steps', 20))
+        self.fm_val_probe_batches = int(getattr(config, 'fm_val_probe_batches', 8))
+        # 本轮校验已经跑过多少个探针 batch（由 AgentLightningModule 每轮清零）
+        self._val_probe_seen = 0
+        # 训练步计数。纯 Python 属性（不进 state_dict，旧 ckpt 严格加载不受影响）；
+        # 持久化由 AgentLightningModule 的 on_save/on_load_checkpoint 写到 ckpt 顶层键。
         self._sc_calls = 0
 
         self.noise_scheduler = DDPMScheduler(
@@ -378,6 +390,12 @@ class DPHead(nn.Module):
         x1_est = x1_est.clamp(-self.fm_clip_range, self.fm_clip_range)
         return (x1_est - x_t) * (1.0 - self.fm_sigma_min) / t_eff
 
+    def _fm_tick(self) -> None:
+        """训练步计数 +1。只按训练批推进：校验批也算的话，warmup 会按
+        (训练批 + 校验批) 的速度提前爬完，且爬升速度取决于校验集大小。"""
+        if self.training:
+            self._sc_calls += 1
+
     def _fm_sc_alpha(self) -> float:
         """Self-consistency probability with a linear warmup.
 
@@ -405,15 +423,28 @@ class DPHead(nn.Module):
         return self.fm_center_weight * min(
             1.0, self._sc_calls / float(self.fm_center_warmup_steps))
 
-    def _fm_zero_noise_path(self, kv: torch.Tensor) -> torch.Tensor:
+    def _fm_center_steps_sample(self) -> int:
+        """中心路径这一批用多少步。空集合 = 固定 fm_center_steps。"""
+        ks = getattr(self, 'fm_center_k_set', ()) or ()
+        if not ks:
+            return max(1, int(self.fm_center_steps))
+        # 按 batch 抽而不是按样本抽：Euler 的 dt 必须整批一致，否则做不成一次前向
+        idx = int(torch.randint(0, len(ks), ()).item())
+        return max(1, ks[idx])
+
+    def _fm_zero_noise_path(self, kv: torch.Tensor, steps: int = None) -> torch.Tensor:
         """从 x(0)=0 做短 Euler，返回中心轨迹的归一化增量。
 
         与推理 `dp_eval_zero_noise=True` 同一套起点与积分方向；训练用
         `fm_center_steps`（默认 4）控制算力。积分图参与反传，目的是让这条
         路径本身变好，不能 detach。
+
+        步数可配置成集合（`fm_center_k_set`）：只用 K=4 训、用 K=20 评，等于逼模型
+        在 4 步里把 20 步的积分误差也补掉，这套速度场在 K=20 下是偏的。集合非空时
+        每批抽一个 K，让中心路径在评测会扫到的每个步数上都是好解。
         """
         B = kv.shape[0]
-        steps = max(1, int(self.fm_center_steps))
+        steps = self._fm_center_steps_sample() if steps is None else max(1, int(steps))
         dt = 1.0 / float(steps)
         x = torch.zeros((B, HORIZON, ACTION_DIM), device=kv.device, dtype=torch.float)
         self_cond = None
@@ -550,14 +581,19 @@ class DPHead(nn.Module):
         noise = torch.randn(x1.shape, device=device, dtype=torch.float)
 
         if self.use_flow_matching:
-            self._sc_calls += 1
+            # 计数器只按训练批推进。校验批也加，会让 warmup 按 val_batches 加速爬完。
+            self._fm_tick()
             t01 = self._fm_sample_t01(B, device)
             t_eff = self._fm_t_eff(t01).view(-1, 1, 1)
 
             # 自洽监督：以 alpha 的概率用模型自己积分出的中间态 x̂_t 替代真值插值点，
             # 并把监督换成"从 x̂_t 出发、在剩余时间内到达 x1 所需的速度"。
             # 恒定目标 (x1-noise) 指向的是真值插值线，无法纠正已经产生的偏差。
-            sc_alpha = self._fm_sc_alpha()
+            #
+            # 只在训练期开启。校验时这里会抽随机 n_roll 并积分出 x̂_t，导致 val/loss
+            # 有一半批次落在"模型自己产生的扰动状态"上——同一个 ckpt 每次校验的分母
+            # 都不一样，epoch 之间不可比，而 ModelCheckpoint 正是按 val/loss 挑 ckpt 的。
+            sc_alpha = self._fm_sc_alpha() if self.training else 0.0
             use_sc = sc_alpha > 0.0 and bool(torch.rand((), device=device) < sc_alpha)
             if use_sc:
                 n_roll = int(torch.randint(1, max(self.fm_sc_max_steps, 1) + 1, ()).item())
@@ -651,6 +687,32 @@ class DPHead(nn.Module):
                     extras['fm_center_ade'] = err.mean()
                     extras['fm_center_fde'] = err[:, -1].mean()
 
+            # 校验期的确定性监控量。上面那一块在 val 里是关的（两臂可比），但
+            # ModelCheckpoint 需要挑 ckpt，而 val/loss 受自洽分支和 3% 抽样支配、
+            # 逐 epoch 抖动 ±1.0，挑不出东西。这里补一条完全确定的曲线：
+            # 固定 K、零噪声起点、不抽随机数，同一 ckpt 每次算出来都一样。
+            # 不参与反传，也不改 val/loss。
+            # 只在每轮的前 fm_val_probe_batches 个 batch 上跑（val 不 shuffle，
+            # 所以这几批在轮与轮之间完全相同）；20 步 Euler 的单批成本约等于 20 次
+            # 前向，全部跑会让每轮多出近一个 epoch 的算力。
+            if (not self.training) and self.fm_val_probe and \
+                    self._val_probe_seen < self.fm_val_probe_batches:
+                self._val_probe_seen += 1
+                with torch.no_grad():
+                    x_c = self._fm_zero_noise_path(kv, steps=self.fm_val_probe_steps)
+                    traj_c = cumsum_traj(x_c)
+                    traj_gt = cumsum_traj(x1)
+                    err = (traj_c[..., :2] - traj_gt[..., :2]).norm(dim=-1)
+                    extras['fm_zero_ade'] = err.mean()
+                    extras['fm_zero_fde'] = err[:, -1].mean()
+                    # 舒适的代理量：增量的一/二阶差分（加速度、jerk）。
+                    # PDM 的 comfort 是阈值型打分，proxy 换不成它的绝对值，
+                    # 但它和 comfort 同向，能当 ckpt 选择的方向性信号。
+                    d1 = x_c.diff(dim=1)
+                    d2 = d1.diff(dim=1)
+                    extras['fm_zero_accel'] = d1.pow(2).mean().sqrt()
+                    extras['fm_zero_jerk'] = d2.pow(2).mean().sqrt()
+
             # ==============================================================
             # 创新点 A/B：评价器引导的生成（论文 3.4.7 / 3.5.5 节）
             # --------------------------------------------------------------
@@ -661,7 +723,9 @@ class DPHead(nn.Module):
             # 纯（不含引导的）损失量级。没有它就算不出"引导项 / 主损失"的比值，
             # 而比值过大正是权重失控的唯一早期信号。
             extras['fm_loss_base'] = fm_loss.detach()
-            if (self.guidance is not None and features is not None
+            # 同样只在训练期生效：引导项会把评分器整条链跑一遍（每步 n_g 次前向），
+            # 放在校验里既拖慢又不改变任何东西——它只是往 loss 上加项，不改指标。
+            if (self.training and self.guidance is not None and features is not None
                     and self._guidance_weights_any()):
                 g = self.guidance
                 every = max(1, int(getattr(self.config, 'guidance_every_n', 1)))

@@ -114,6 +114,22 @@ fm_center_weight="${FM_CENTER_WEIGHT:-0.0}"
 fm_center_steps="${FM_CENTER_STEPS:-4}"
 fm_center_p="${FM_CENTER_P:-1.0}"
 fm_center_warmup_steps="${FM_CENTER_WARMUP_STEPS:-2000}"
+# 中心路径的步数集合（Hydra 列表语法，如 "[4,8,20]"）。空 = 固定 fm_center_steps。
+# 只在 K=4 上训、在 K=20 上评，中心路径学到的是"补偿粗积分"的速度场，细步长下偏。
+# 训练集合里要包含评测要扫的每个 K。
+fm_center_k_set="${FM_CENTER_K_SET:-[]}"
+# 校验期确定性监控（零噪声路径 ADE/FDE/accel/jerk）。ModelCheckpoint 按它挑 ckpt。
+fm_val_probe="${FM_VAL_PROBE:-true}"
+fm_val_probe_steps="${FM_VAL_PROBE_STEPS:-20}"
+# 每轮只在前 N 个校验 batch 上跑探针（val 不 shuffle，这几批轮间相同）。
+# 20 步 Euler 的单批成本约等于 20 次前向，全跑会多出近一个 epoch 的算力。
+fm_val_probe_batches="${FM_VAL_PROBE_BATCHES:-8}"
+# 训练随机种子。以前固定来自 competition_training.yaml 的 seed: 0，不可覆盖，
+# 因此"换一次跑"实际只是同一 RNG 流的不同截断，不能当独立重复。
+experiment_seed="${SEED:-0}"
+# 校验抽样比例。沿用 competition_training.yaml 的 0.03 保持向后兼容；
+# 0.03 时 val/loss 的标准误盖过 epoch 间差异，phase 脚本已统一提到 0.1。
+limit_val_batches="${LIMIT_VAL_BATCHES:-0.03}"
 
 if [ -n "${RESUME_CKPT}" ]; then
   if [ ! -f "${RESUME_CKPT}" ]; then
@@ -137,6 +153,15 @@ fi
 
 LOG_DIR="${NAVSIM_EXP_ROOT}/logs"
 mkdir -p "${LOG_DIR}" "${NAVSIM_EXP_ROOT}/${experiment_name}"
+# 记下代码版本。hydra 快照里有 override 但没有 commit，事后无法判断某次结果是哪版
+# 代码跑出来的（上一轮就是靠 CSV 里有没有 val/fm_center_* 才倒推出代码版本对不上）。
+EXP_ROOT="${NAVSIM_EXP_ROOT}/${experiment_name}"
+{
+  echo "git_head=$(git -C "${NAVSIM_DEVKIT_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)"
+  echo "git_dirty=$(git -C "${NAVSIM_DEVKIT_ROOT}" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+  echo "started_at=$(date '+%Y-%m-%d %H:%M:%S')"
+  echo "seed=${experiment_seed} epochs=${max_epochs} center_k_set=${fm_center_k_set:-${fm_center_steps}}"
+} > "${EXP_ROOT}/code_rev.txt" 2>/dev/null || true
 EMPTY_DP_PREDS="${NAVSIM_EXP_ROOT}/${experiment_name}/empty_dp_preds.pkl"
 python - <<PY
 import pickle
@@ -202,6 +227,10 @@ python "${NAVSIM_DEVKIT_ROOT}/navsim/planning/script/run_training_dense.py" \
   ++agent.config.fm_center_steps="${fm_center_steps}" \
   ++agent.config.fm_center_p="${fm_center_p}" \
   ++agent.config.fm_center_warmup_steps="${fm_center_warmup_steps}" \
+  ++agent.config.fm_center_k_set="${fm_center_k_set}" \
+  ++agent.config.fm_val_probe="${fm_val_probe}" \
+  ++agent.config.fm_val_probe_steps="${fm_val_probe_steps}" \
+  ++agent.config.fm_val_probe_batches="${fm_val_probe_batches}" \
   ++agent.config.scorer_guidance="${scorer_guidance}" \
   ++agent.config.scorer_ckpt="'${scorer_ckpt}'" \
   ++agent.config.scorer_vocab_path="'${scorer_vocab_path}'" \
@@ -218,5 +247,7 @@ python "${NAVSIM_DEVKIT_ROOT}/navsim/planning/script/run_training_dense.py" \
   ++agent.config.guidance_samples="${guidance_samples}" \
   ++agent.config.guidance_every_n="${guidance_every_n}" \
   ++agent.config.vov_ckpt="${VOV_CKPT}" \
+  seed="${experiment_seed}" \
+  trainer.params.limit_val_batches="${limit_val_batches}" \
   cache_path="${CACHE_PATH:-null}" \
   force_cache_computation="${FORCE_CACHE_COMPUTATION:-false}"

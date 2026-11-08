@@ -36,6 +36,11 @@ from navsim.common.dataclasses import Trajectory
 from navsim.evaluate.pdm_score import transform_trajectory, get_trajectory_as_array
 
 
+def _dp_head(agent):
+    """DPAgent 的轨迹头（warmup 计数器挂在它上面）；非 DP agent 返回 None。"""
+    return getattr(getattr(getattr(agent, "model", None), "_trajectory_head", None), None, None)
+
+
 class AgentLightningModule(pl.LightningModule):
     """Pytorch lightning wrapper for learnable agent."""
 
@@ -124,6 +129,12 @@ class AgentLightningModule(pl.LightningModule):
         """
         return self._step(batch, "train")
 
+    def on_validation_epoch_start(self) -> None:
+        """每轮校验重置探针预算。探针只在每轮前 N 个 batch 上跑（见 DPHead）。"""
+        head = _dp_head(self.agent)
+        if head is not None and hasattr(head, "_val_probe_seen"):
+            head._val_probe_seen = 0
+
     def validation_step(self, batch: Tuple[Dict[str, Tensor], Dict[str, Tensor]], batch_idx: int):
         """
         Step called on validation samples
@@ -137,6 +148,17 @@ class AgentLightningModule(pl.LightningModule):
         """Inherited, see superclass."""
         return self.agent.get_optimizers()
 
+    def on_save_checkpoint(self, checkpoint: Dict) -> None:
+        """把 DPHead 的训练步计数写进 checkpoint。
+
+        warmup（自洽 / 中心 / 引导）都按 `_sc_calls` 线性爬升，而这个计数器原本是纯
+        Python 属性，CLI 续训后从 0 重新爬 —— 等于每次续训都把已收敛的配置退回起点。
+        改成 buffer 会破坏旧 ckpt 的严格加载，所以放在 ckpt 的顶层键里。
+        """
+        head = _dp_head(self.agent)
+        if head is not None and hasattr(head, "_sc_calls"):
+            checkpoint['dp_sc_calls'] = int(head._sc_calls)
+
     def on_load_checkpoint(self, checkpoint: Dict) -> None:
         """Pad Adam moments when fm_self_conditioning widens input_emb.
 
@@ -147,6 +169,18 @@ class AgentLightningModule(pl.LightningModule):
         ``size of tensor a (D) must match ... (2D)``. Expand matching moments
         the same way before PL loads them.
         """
+        # 先恢复训练步计数（与优化器状态无关，放在所有提前返回之前）。
+        head = _dp_head(self.agent)
+        if head is not None and 'dp_sc_calls' in checkpoint:
+            try:
+                head._sc_calls = int(checkpoint['dp_sc_calls'])
+                import logging
+                logging.getLogger(__name__).info(
+                    "on_load_checkpoint: restored dp_sc_calls=%d (warmups resume, not restart)",
+                    int(checkpoint['dp_sc_calls']))
+            except Exception:
+                pass
+
         if not isinstance(self.agent, DPAgent):
             return
         if not bool(getattr(self.agent._config, 'fm_self_conditioning', False)):

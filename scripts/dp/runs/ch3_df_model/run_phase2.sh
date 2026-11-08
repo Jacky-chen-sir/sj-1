@@ -22,7 +22,7 @@ EVAL="$ROOT_DIR/scripts/evaluation/eval_dp_fm_joint_navtest.sh"
 NAVSIM_EXP_ROOT="${NAVSIM_EXP_ROOT:-/home/ws/navsim_workspace/exp}"
 REL="${REL:-ch3_df}"
 ARM="${ARM:-center}"               # center | fm18 | both
-EPOCHS="${EPOCHS:-18}"
+EPOCHS="${EPOCHS:-5}"            # 2026-11-08：18ep 太长且 P2 失败，今后默认 5ep，无效即停
 BS="${BS:-8}"
 WORKERS="${WORKERS:-4}"
 GPU="${GPU:-0,1,2}"
@@ -30,6 +30,12 @@ FM_STEPS="${FM_STEPS:-20}"
 FM_CENTER_WEIGHT="${FM_CENTER_WEIGHT:-0.5}"
 FM_CENTER_STEPS="${FM_CENTER_STEPS:-4}"
 FM_CENTER_WARMUP_STEPS="${FM_CENTER_WARMUP_STEPS:-2000}"
+# 中心路径的步数集合。默认与评测扫的 K 对齐（评测主线 K=20）。
+# 只在 K=4 上训、在 K=20 上评，中心路径学到的是补偿粗积分误差的速度场。
+FM_CENTER_K_SET="${FM_CENTER_K_SET:-[4,8,20]}"
+# 校验抽样比例 + 随机种子。3% 时 val/loss 的标准误盖过 epoch 间差异，挑不了 ckpt。
+LIMIT_VAL_BATCHES="${LIMIT_VAL_BATCHES:-0.1}"
+SEED="${SEED:-0}"
 # 默认 true：与已跑通的 p1_center 同口径（若要对齐 Phase0 再显式 false）
 FM_SELF_CONDITIONING="${FM_SELF_CONDITIONING:-true}"
 DRY_RUN="${DRY_RUN:-0}"
@@ -81,6 +87,8 @@ train_center() {
   REINIT_TRAJ_HEAD=true \
   FM_CENTER_WEIGHT="$FM_CENTER_WEIGHT" FM_CENTER_STEPS="$FM_CENTER_STEPS" FM_CENTER_P=1.0 \
   FM_CENTER_WARMUP_STEPS="$FM_CENTER_WARMUP_STEPS" \
+  FM_CENTER_K_SET="$FM_CENTER_K_SET" \
+  SEED="$SEED" LIMIT_VAL_BATCHES="$LIMIT_VAL_BATCHES" \
   FM_SELF_CONDITIONING="$FM_SELF_CONDITIONING" \
   SCORER_GUIDANCE=false LAMBDA_SCORE=0 LAMBDA_SAFE_FEAS=0 LAMBDA_COMFORT_DIV=0 \
     bash "$TRAIN"

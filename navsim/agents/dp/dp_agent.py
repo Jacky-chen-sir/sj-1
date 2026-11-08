@@ -227,9 +227,17 @@ class DPAgent(AbstractAgent):
             raise ValueError('Unsupported lr scheduler')
 
     def get_training_callbacks(self) -> List[pl.Callback]:
+        # ckpt 选择口径。默认按校验期零噪声路径的 ADE（确定性、无随机抽样、
+        # 与推理口径一致）；val/loss 会被自洽分支和 limit_val_batches 的抽样支配，
+        # 逐 epoch 抖动 ±1，挑不出可信的 ckpt。
+        # 不满足条件（非 FM / 关了 probe）时退回 val/loss。
+        monitor = "val/loss_epoch"
+        if (bool(getattr(self._config, 'use_flow_matching', False))
+                and bool(getattr(self._config, 'fm_val_probe', True))):
+            monitor = "val/fm_zero_ade_epoch"
         ckpt_callback = ModelCheckpoint(
             save_top_k=100,
-            monitor="val/loss_epoch",
+            monitor=monitor,
             mode="min",
             dirpath=f"{os.environ.get('NAVSIM_EXP_ROOT')}/{self._config.ckpt_path}/",
             filename="{epoch:02d}-{step:04d}",
