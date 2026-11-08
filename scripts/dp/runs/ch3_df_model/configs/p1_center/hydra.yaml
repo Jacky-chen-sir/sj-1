@@ -1,0 +1,217 @@
+hydra:
+  run:
+    dir: ${output_dir}
+  sweep:
+    dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}
+  launcher:
+    _target_: hydra._internal.core_plugins.basic_launcher.BasicLauncher
+  sweeper:
+    _target_: hydra._internal.core_plugins.basic_sweeper.BasicSweeper
+    max_batch_size: null
+    params: null
+  help:
+    app_name: ${hydra.job.name}
+    header: '${hydra.help.app_name} is powered by Hydra.
+
+      '
+    footer: 'Powered by Hydra (https://hydra.cc)
+
+      Use --hydra-help to view Hydra specific help
+
+      '
+    template: '${hydra.help.header}
+
+      == Configuration groups ==
+
+      Compose your configuration from those groups (group=option)
+
+
+      $APP_CONFIG_GROUPS
+
+
+      == Config ==
+
+      Override anything in the config (foo.bar=value)
+
+
+      $CONFIG
+
+
+      ${hydra.help.footer}
+
+      '
+  hydra_help:
+    template: 'Hydra (${hydra.runtime.version})
+
+      See https://hydra.cc for more info.
+
+
+      == Flags ==
+
+      $FLAGS_HELP
+
+
+      == Configuration groups ==
+
+      Compose your configuration from those groups (For example, append hydra/job_logging=disabled
+      to command line)
+
+
+      $HYDRA_CONFIG_GROUPS
+
+
+      Use ''--cfg hydra'' to Show the Hydra config.
+
+      '
+    hydra_help: ???
+  hydra_logging:
+    version: 1
+    formatters:
+      simple:
+        format: '[%(asctime)s][HYDRA] %(message)s'
+    handlers:
+      console:
+        class: logging.StreamHandler
+        formatter: simple
+        stream: ext://sys.stdout
+    root:
+      level: INFO
+      handlers:
+      - console
+    loggers:
+      logging_example:
+        level: DEBUG
+    disable_existing_loggers: false
+  job_logging:
+    version: 1
+    formatters:
+      simple:
+        format: '[%(asctime)s][%(name)s][%(levelname)s] - %(message)s'
+    handlers:
+      console:
+        class: logging.StreamHandler
+        formatter: simple
+        stream: ext://sys.stdout
+      file:
+        class: logging.FileHandler
+        formatter: simple
+        filename: ${hydra.runtime.output_dir}/${hydra.job.name}.log
+    root:
+      level: INFO
+      handlers:
+      - console
+      - file
+    disable_existing_loggers: false
+  env: {}
+  mode: RUN
+  searchpath:
+  - pkg://navsim.planning.script.config.common
+  callbacks: {}
+  output_subdir: ${output_dir}/code/hydra
+  overrides:
+    hydra:
+    - hydra.mode=RUN
+    task:
+    - trainer.params.num_nodes=1
+    - ++trainer.params.devices=3
+    - ++trainer.params.accelerator=gpu
+    - agent=gtrs_diffusion_policy
+    - experiment_name=ch3_df/p1_center
+    - train_test_split=navtrain
+    - dataloader.params.batch_size=8
+    - ++dataloader.params.num_workers=4
+    - ++dataloader.params.pin_memory=true
+    - ++dataloader.params.persistent_workers=true
+    - ~trainer.params.strategy
+    - trainer.params.max_epochs=5
+    - trainer.params.precision=32
+    - agent.config.ckpt_path=ch3_df/p1_center
+    - agent.checkpoint_path=/home/ws/navsim_workspace/GTRS_official/data/models/gtrs_dp_model.ckpt
+    - agent.lr=0.0001
+    - ++agent.config.use_flow_matching=true
+    - ++agent.config.fm_num_inference_steps=20
+    - ++agent.config.freeze_except_traj_head=false
+    - ++agent.config.reinit_traj_head=true
+    - ++agent.config.lr_mult_backbone=0.1
+    - ++agent.config.bev_loss_weight=1.0
+    - ++agent.config.fm_traj_aux_weight=0.5
+    - ++agent.config.fm_traj_aux_pos_weight=1.0
+    - ++agent.config.fm_traj_aux_head_weight=1.0
+    - ++agent.config.fm_kin_weight=0.5
+    - ++agent.config.fm_lattice_t_prob=0.5
+    - ++agent.config.fm_lattice_k_set=[2,3,4,5,8,10,20]
+    - ++agent.config.fm_clip_sample=true
+    - ++agent.config.fm_self_consistency_p=0.5
+    - ++agent.config.fm_sc_max_steps=4
+    - ++agent.config.fm_sc_warmup_steps=2000
+    - ++agent.config.fm_self_conditioning=true
+    - ++agent.config.fm_center_weight=0.5
+    - ++agent.config.fm_center_steps=4
+    - ++agent.config.fm_center_p=1.0
+    - ++agent.config.fm_center_warmup_steps=2000
+    - ++agent.config.scorer_guidance=false
+    - ++agent.config.scorer_ckpt=''
+    - ++agent.config.scorer_vocab_path='/home/ws/navsim_workspace/GTRS_official/traj_final/test_8192_kmeans.npy'
+    - ++agent.config.scorer_allow_partial_load=false
+    - ++agent.config.lambda_score=0
+    - ++agent.config.score_temperature=1.0
+    - ++agent.config.lambda_safe_feas=0
+    - ++agent.config.safe_feas_margin=0.5
+    - ++agent.config.lambda_comfort_div=0
+    - ++agent.config.comfort_div_target=1.0
+    - ++agent.config.guidance_t_min=0.5
+    - ++agent.config.guidance_t_floor=0.1
+    - ++agent.config.guidance_warmup_steps=2000
+    - ++agent.config.guidance_samples=2
+    - ++agent.config.guidance_every_n=1
+    - ++agent.config.vov_ckpt=/home/ws/navsim_workspace/dataset/models/dd3d_det_final.pth
+    - cache_path=null
+    - force_cache_computation=false
+  job:
+    name: run_training_dense
+    chdir: false
+    override_dirname: ++agent.config.bev_loss_weight=1.0,++agent.config.comfort_div_target=1.0,++agent.config.fm_center_p=1.0,++agent.config.fm_center_steps=4,++agent.config.fm_center_warmup_steps=2000,++agent.config.fm_center_weight=0.5,++agent.config.fm_clip_sample=true,++agent.config.fm_kin_weight=0.5,++agent.config.fm_lattice_k_set=[2,3,4,5,8,10,20],++agent.config.fm_lattice_t_prob=0.5,++agent.config.fm_num_inference_steps=20,++agent.config.fm_sc_max_steps=4,++agent.config.fm_sc_warmup_steps=2000,++agent.config.fm_self_conditioning=true,++agent.config.fm_self_consistency_p=0.5,++agent.config.fm_traj_aux_head_weight=1.0,++agent.config.fm_traj_aux_pos_weight=1.0,++agent.config.fm_traj_aux_weight=0.5,++agent.config.freeze_except_traj_head=false,++agent.config.guidance_every_n=1,++agent.config.guidance_samples=2,++agent.config.guidance_t_floor=0.1,++agent.config.guidance_t_min=0.5,++agent.config.guidance_warmup_steps=2000,++agent.config.lambda_comfort_div=0,++agent.config.lambda_safe_feas=0,++agent.config.lambda_score=0,++agent.config.lr_mult_backbone=0.1,++agent.config.reinit_traj_head=true,++agent.config.safe_feas_margin=0.5,++agent.config.score_temperature=1.0,++agent.config.scorer_allow_partial_load=false,++agent.config.scorer_ckpt='',++agent.config.scorer_guidance=false,++agent.config.scorer_vocab_path='/home/ws/navsim_workspace/GTRS_official/traj_final/test_8192_kmeans.npy',++agent.config.use_flow_matching=true,++agent.config.vov_ckpt=/home/ws/navsim_workspace/dataset/models/dd3d_det_final.pth,++dataloader.params.num_workers=4,++dataloader.params.persistent_workers=true,++dataloader.params.pin_memory=true,++trainer.params.accelerator=gpu,++trainer.params.devices=3,agent.checkpoint_path=/home/ws/navsim_workspace/GTRS_official/data/models/gtrs_dp_model.ckpt,agent.config.ckpt_path=ch3_df/p1_center,agent.lr=0.0001,agent=gtrs_diffusion_policy,cache_path=null,dataloader.params.batch_size=8,experiment_name=ch3_df/p1_center,force_cache_computation=false,train_test_split=navtrain,trainer.params.max_epochs=5,trainer.params.num_nodes=1,trainer.params.precision=32,~trainer.params.strategy
+    id: ???
+    num: ???
+    config_name: competition_training
+    env_set: {}
+    env_copy: []
+    config:
+      override_dirname:
+        kv_sep: '='
+        item_sep: ','
+        exclude_keys: []
+  runtime:
+    version: 1.2.0
+    version_base: '1.2'
+    cwd: /home/ws/navsim_workspace/GTRS_official
+    config_sources:
+    - path: hydra.conf
+      schema: pkg
+      provider: hydra
+    - path: /home/ws/navsim_workspace/GTRS_official/navsim/planning/script/config/training
+      schema: file
+      provider: main
+    - path: navsim.planning.script.config.common
+      schema: pkg
+      provider: hydra.searchpath in main
+    - path: ''
+      schema: structured
+      provider: schema
+    output_dir: /home/ws/navsim_workspace/exp/ch3_df/p1_center/2026.10.26.05.13.51
+    choices:
+      agent: gtrs_diffusion_policy
+      worker: ray_distributed_no_torch
+      train_test_split: navtrain
+      train_test_split/scene_filter: navtrain
+      hydra/env: default
+      hydra/callbacks: null
+      hydra/job_logging: default
+      hydra/hydra_logging: default
+      hydra/hydra_help: default
+      hydra/help: default
+      hydra/sweeper: basic
+      hydra/launcher: basic
+      hydra/output: default
+  verbose: false

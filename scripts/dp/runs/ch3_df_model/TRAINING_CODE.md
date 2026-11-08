@@ -31,6 +31,9 @@
 | `scripts/dp/runs/ch3_df_model/run_phase1.sh` | 两臂 5ep：`p1_base`（w=0）/ `p1_center`（w=0.5）+ zero 评测 |
 | `scripts/dp/runs/ch3_df_model/run_phase2.sh` | `p2_center18` 默认 18ep + zero 评测；可选评已有 FM ep18 |
 
+**YAML / 覆盖快照**：见同目录 `configs/README.md`  
+（`competition_training.yaml`、`gtrs_diffusion_policy.yaml` 副本 + P1/P2 真实 `overrides.yaml`）。
+
 常用环境变量：
 
 ```bash
