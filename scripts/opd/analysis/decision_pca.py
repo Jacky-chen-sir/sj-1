@@ -435,8 +435,22 @@ def _plt():
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    plt.rcParams['font.sans-serif'] = ['Hiragino Sans GB', 'PingFang SC',
-                                       'Arial Unicode MS', 'DejaVu Sans']
+    from matplotlib import font_manager
+    from pathlib import Path
+    # 优先注册系统 Noto CJK，避免中文标题缺字
+    for p in (
+        '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+        '/usr/share/fonts/opentype/noto/NotoSansCJK-Medium.ttc',
+    ):
+        if Path(p).exists():
+            try:
+                font_manager.fontManager.addfont(p)
+            except Exception:
+                pass
+    plt.rcParams['font.sans-serif'] = [
+        'Noto Sans CJK SC', 'Noto Sans CJK JP', 'Noto Sans CJK TC',
+        'Hiragino Sans GB', 'PingFang SC', 'DejaVu Sans',
+    ]
     plt.rcParams['axes.unicode_minus'] = False
     return plt
 

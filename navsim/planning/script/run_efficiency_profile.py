@@ -59,7 +59,8 @@ CONFIG_NAME = "default_run_pdm_score_gpu"
 _FIELDS = ("tag", "agent", "infer_slot", "backbone", "ckpt", "device", "gpu_name", "batch_size",
            "n_params_total_M", "n_params_trainable_M", "flops_g_per_sample",
            "latency_ms_per_sample_mean", "latency_ms_per_sample_p50",
-           "latency_ms_per_sample_p95", "latency_ms_per_sample_std", "fps")
+           "latency_ms_per_sample_p95", "latency_ms_per_sample_std", "fps",
+           "peak_mem_mb")
 
 
 def _to_device(obj, device):
@@ -220,6 +221,17 @@ def main(cfg: DictConfig) -> None:
 
     n_total, n_trainable = _count_params(model)
     flops = _count_flops(agent, batch)
+
+    # peak inference memory (weights + activations for one forward), same batch as latency
+    peak_mem_mb = float("nan")
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+        torch.cuda.empty_cache()
+        with torch.no_grad():
+            agent.forward(batch)
+        torch.cuda.synchronize()
+        peak_mem_mb = torch.cuda.max_memory_allocated(device) / (1024.0 ** 2)
+
     mean, p50, p95, std = _time_forward(agent, batch, device, warmup, iters)
 
     row = {
@@ -239,6 +251,7 @@ def main(cfg: DictConfig) -> None:
         "latency_ms_per_sample_p95": f"{p95:.2f}",
         "latency_ms_per_sample_std": f"{std:.2f}",
         "fps": f"{1000.0 / mean:.1f}" if mean > 0 else "",
+        "peak_mem_mb": f"{peak_mem_mb:.0f}" if peak_mem_mb == peak_mem_mb else "",
     }
     _append_row(out_path, row)
 
@@ -251,6 +264,7 @@ def main(cfg: DictConfig) -> None:
                      (p50 {row['latency_ms_per_sample_p50']}, p95 {row['latency_ms_per_sample_p95']},
                       std {row['latency_ms_per_sample_std']})
           吞吐     : {row['fps']} FPS
+          峰值显存 : {row['peak_mem_mb']} MB
         已追加到: {out_path}
         """
     )
