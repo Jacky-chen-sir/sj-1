@@ -1,0 +1,13 @@
+arm,epoch,K,score,ckpt
+base,epoch02,20,0.6501757990479727,/home/ws/navsim_workspace/exp/ch3_df_v2/p1_base/epoch=02-step=12912.ckpt
+base,epoch02,4,0.5672963904830093,/home/ws/navsim_workspace/exp/ch3_df_v2/p1_base/epoch=02-step=12912.ckpt
+base,epoch03,20,0.6049947420664724,/home/ws/navsim_workspace/exp/ch3_df_v2/p1_base/epoch=03-step=17216.ckpt
+base,epoch03,4,0.6053675360932975,/home/ws/navsim_workspace/exp/ch3_df_v2/p1_base/epoch=03-step=17216.ckpt
+base,epoch04,20,0.5614950652656303,/home/ws/navsim_workspace/exp/ch3_df_v2/p1_base/epoch=04-step=21520.ckpt
+base,epoch04,4,0.6423739544273656,/home/ws/navsim_workspace/exp/ch3_df_v2/p1_base/epoch=04-step=21520.ckpt
+center,epoch02,20,0.7052865210215631,/home/ws/navsim_workspace/exp/ch3_df_v2/p1_center/epoch=02-step=12912.ckpt
+center,epoch02,4,0.6644625931832777,/home/ws/navsim_workspace/exp/ch3_df_v2/p1_center/epoch=02-step=12912.ckpt
+center,epoch03,20,0.6725496165239818,/home/ws/navsim_workspace/exp/ch3_df_v2/p1_center/epoch=03-step=17216.ckpt
+center,epoch03,4,0.6838984901565051,/home/ws/navsim_workspace/exp/ch3_df_v2/p1_center/epoch=03-step=17216.ckpt
+center,epoch04,20,0.7352409773998472,/home/ws/navsim_workspace/exp/ch3_df_v2/p1_center/epoch=04-step=21520.ckpt
+center,epoch04,4,0.7265542620103423,/home/ws/navsim_workspace/exp/ch3_df_v2/p1_center/epoch=04-step=21520.ckpt
