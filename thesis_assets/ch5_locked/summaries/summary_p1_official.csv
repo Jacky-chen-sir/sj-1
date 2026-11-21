@@ -1,1 +1,4 @@
 arm,epoch,K_or_steps,score,ckpt
+official,epoch02,ddpm100,0.6758829187980021,/home/ws/navsim_workspace/exp/ch3_df_v2/p1_official/epoch=02-step=12912.ckpt
+official,epoch03,ddpm100,0.670693506297647,/home/ws/navsim_workspace/exp/ch3_df_v2/p1_official/epoch=03-step=17216.ckpt
+official,epoch04,ddpm100,0.6821541785045402,/home/ws/navsim_workspace/exp/ch3_df_v2/p1_official/epoch=04-step=21520.ckpt
